@@ -100,6 +100,8 @@ const extractAuthTokens = (clientId: string, redirectUrl: string, scope: string)
 export default function App() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
+  const [abcInput, setAbcInput] = useState('');
+  const [abcExpanded, setAbcExpanded] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
   const authConfig = {
     clientId: envClientId ?? '',
@@ -517,13 +519,19 @@ export default function App() {
 
   const handleSend = async () => {
     const trimmed = input.trim();
-    if (!trimmed || isRunning) {
+    const abcTrimmed = abcInput.trim();
+    if ((!trimmed && !abcTrimmed) || isRunning) {
       return;
     }
 
+    const userContent = abcTrimmed
+      ? `Add this ABC notation as a track:\n\n\`\`\`\n${abcTrimmed}\n\`\`\`\n\n${trimmed || 'Add it to the project.'}`
+      : trimmed;
+
     setIsRunning(true);
-    addMessage('user', trimmed);
+    addMessage('user', userContent);
     setInput('');
+    if (abcTrimmed) setAbcInput('');
 
     try {
       const authTokens = authStatus?.loggedIn
@@ -546,7 +554,7 @@ export default function App() {
         }));
 
       const response = await runAgent('http://127.0.0.1:8000', {
-        prompt: trimmed,
+        prompt: userContent,
         keywords: [],
         loop: 1,
         authTokens: authTokens || undefined,
@@ -777,13 +785,34 @@ export default function App() {
                 handleSend();
               }}
             >
+              <div className="abc-input-section">
+                <button
+                  type="button"
+                  className="abc-toggle"
+                  onClick={() => setAbcExpanded(!abcExpanded)}
+                  aria-expanded={abcExpanded}
+                  aria-label={abcExpanded ? 'Collapse ABC input' : 'Expand ABC notation input'}
+                >
+                  {abcExpanded ? '−' : '+'} ABC notation
+                </button>
+                {abcExpanded && (
+                  <textarea
+                    value={abcInput}
+                    onChange={(e) => setAbcInput(e.target.value)}
+                    placeholder={'X:1\nK:C\nL:1/4\nCDEF GABc|'}
+                    className="abc-textarea"
+                    rows={5}
+                    aria-label="ABC notation"
+                  />
+                )}
+              </div>
               <input
                 value={input}
                 onChange={(event) => setInput(event.target.value)}
                 placeholder="Type your message..."
                 aria-label="Chat message"
               />
-              <button type="submit" disabled={!input.trim() || isRunning}>
+              <button type="submit" disabled={(!input.trim() && !abcInput.trim()) || isRunning}>
                 {isRunning ? 'Sending...' : 'Send'}
               </button>
             </form>

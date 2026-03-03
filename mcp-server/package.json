@@ -13,6 +13,7 @@
   "dependencies": {
     "@audiotool/nexus": "^0.0.12",
     "@modelcontextprotocol/sdk": "^1.26.0",
+    "abcjs": "^6.6.2",
     "zod": "^3.25.76"
   },
   "devDependencies": {

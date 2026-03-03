@@ -2,6 +2,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import abcjs from "abcjs";
 import {
   getLoginStatus,
   createAudiotoolClient,
@@ -30,6 +31,7 @@ const VALID_ENTITY_TYPES = [
   "machiniste",
   "tonematrix",
   "stompboxDelay",
+  "notetrack",
 ] as const;
 
 const ENTITY_TYPE_ALIASES: Record<string, string> = {
@@ -37,6 +39,52 @@ const ENTITY_TYPE_ALIASES: Record<string, string> = {
   "drum machine": "machiniste",
   drummachine: "machiniste",
 };
+
+/** Audiotool ticks: 1 whole note = 15360, 1 quarter = 3840 */
+const TICKS_WHOLE = 15360;
+const TICKS_QUARTER = 3840;
+
+/**
+ * Parse ABC notation and extract notes using abcjs.
+ * Returns { pitch, positionTicks, durationTicks, velocity }.
+ * Uses tune.setUpAudio() which returns tracks with events (start/duration in whole-note units).
+ */
+function parseAbcToNotes(abcString: string): Array<{ pitch: number; positionTicks: number; durationTicks: number; velocity: number }> {
+  const notes: Array<{ pitch: number; positionTicks: number; durationTicks: number; velocity: number }> = [];
+  try {
+    const tuneObjs = abcjs.parseOnly(abcString.trim());
+    if (!tuneObjs || tuneObjs.length < 1) {
+      throw new Error("No tune found in ABC notation");
+    }
+    const tuneObj = tuneObjs[0] as { setUpAudio?: (opts?: object) => { tracks?: Array<Array<{ cmd?: string; pitch?: number; start?: number; duration?: number; volume?: number }>> } };
+    const audio = tuneObj?.setUpAudio?.({});
+    if (!audio?.tracks) {
+      throw new Error("Could not extract sequence from ABC");
+    }
+    for (const track of audio.tracks) {
+      if (!Array.isArray(track)) continue;
+      for (const ev of track) {
+        if (ev.cmd === "note" && ev.pitch != null) {
+          const start = ev.start ?? 0;
+          const duration = ev.duration ?? 0.25;
+          const positionTicks = Math.round(start * TICKS_WHOLE);
+          const durationTicks = Math.max(TICKS_QUARTER / 4, Math.round(duration * TICKS_WHOLE));
+          const velocity = ev.volume != null ? Math.min(1, Math.max(0, ev.volume / 127)) : 0.7;
+          notes.push({
+            pitch: Math.max(0, Math.min(127, ev.pitch)),
+            positionTicks,
+            durationTicks,
+            velocity,
+          });
+        }
+      }
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`Failed to parse ABC notation: ${msg}`);
+  }
+  return notes.sort((a, b) => a.positionTicks - b.positionTicks);
+}
 
 function levenshtein(a: string, b: string): number {
   const m = a.length,
@@ -449,6 +497,160 @@ server.registerTool(
     }
   },
 );
+
+// add-abc-track tool
+server.registerTool(
+  "add-abc-track",
+  {
+    description: [
+      "Add a note track to the Audiotool DAW from ABC notation.",
+      "Parses the ABC string, creates a Heisenberg synth (or uses an existing note-playing device),",
+      "creates a NoteTrack, NoteCollection, NoteRegion, and adds all notes. Call this when the user",
+      "provides music in ABC notation (e.g. X:1, K:C, L:1/4, CDEF GABc|).",
+    ].join(" "),
+    inputSchema: z.object({
+      abcNotation: z
+        .string()
+        .describe("ABC notation string (e.g. X:1\\nK:C\\nL:1/4\\nCDEF GABc|)"),
+      playerEntityId: z
+        .string()
+        .optional()
+        .describe(
+          "ID of existing Heisenberg/Bassline/Space/etc. to use. If omitted, a new Heisenberg is created.",
+        ),
+      x: z.number().optional().describe("X position for new Heisenberg (if created)"),
+      y: z.number().optional().describe("Y position for new Heisenberg (if created)"),
+    }),
+  },
+  async (args: {
+    abcNotation: string;
+    playerEntityId?: string;
+    x?: number;
+    y?: number;
+  }) => {
+    try {
+      const notes = parseAbcToNotes(args.abcNotation);
+      if (notes.length === 0) {
+        throw new Error("No notes found in ABC notation");
+      }
+
+      const doc = await getDocument();
+
+      const result = await doc.modify((t) => {
+        try {
+          let playerLocation: { location: { id: string } };
+          if (args.playerEntityId) {
+            const playerEntity = t.entities.getEntity(args.playerEntityId);
+            if (!playerEntity) {
+              return { error: `Player entity ${args.playerEntityId} not found` };
+            }
+            playerLocation = playerEntity as any;
+          } else {
+            const posX = args.x ?? autoLayoutOffset * 120;
+            const posY = args.y ?? 0;
+            autoLayoutOffset++;
+            const heisenberg = t.create("heisenberg" as any, {
+              positionX: posX,
+              positionY: posY,
+            });
+            if (!heisenberg) {
+              return { error: "Failed to create Heisenberg synth" };
+            }
+            playerLocation = heisenberg as any;
+          }
+
+          const noteTrack = t.create("noteTrack" as any, {
+            orderAmongTracks: 0,
+            player: playerLocation.location,
+          });
+          if (!noteTrack) {
+            return { error: "Failed to create NoteTrack" };
+          }
+
+          const noteCollection = t.create("noteCollection" as any, {});
+          if (!noteCollection) {
+            return { error: "Failed to create NoteCollection" };
+          }
+
+          const lastNote = notes[notes.length - 1];
+          const regionEnd =
+            lastNote.positionTicks + lastNote.durationTicks;
+          const regionDuration = Math.max(regionEnd, TICKS_WHOLE);
+
+          const noteRegion = t.create("noteRegion" as any, {
+            track: (noteTrack as any).location,
+            collection: (noteCollection as any).location,
+            region: {
+              positionTicks: 0,
+              durationTicks: regionDuration,
+              loopDurationTicks: regionDuration,
+              collectionOffsetTicks: 0,
+              loopOffsetTicks: 0,
+            },
+          });
+          if (!noteRegion) {
+            return { error: "Failed to create NoteRegion" };
+          }
+
+          for (const n of notes) {
+            t.create("note" as any, {
+              collection: (noteCollection as any).location,
+              positionTicks: n.positionTicks,
+              durationTicks: n.durationTicks,
+              pitch: n.pitch,
+              velocity: n.velocity,
+            });
+          }
+
+          return {
+            noteTrackId: (noteTrack as any).id,
+            noteCount: notes.length,
+          };
+        } catch (innerError) {
+          const msg =
+            innerError instanceof Error
+              ? innerError.message
+              : String(innerError);
+          return { error: msg };
+        }
+      });
+
+      if ("error" in result) {
+        throw new Error(result.error as string);
+      }
+
+      const { noteTrackId, noteCount } = result as {
+        noteTrackId: string;
+        noteCount: number;
+      };
+      console.error(
+        `[add-abc-track] Added track with ${noteCount} notes, track ID: ${noteTrackId}`,
+      );
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Added ABC track with ${noteCount} notes. NoteTrack ID: ${noteTrackId}`,
+          },
+        ],
+      };
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      console.error(`[add-abc-track] ERROR:`, errorMsg);
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Failed to add ABC track: ${errorMsg}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
 // remove entity tool
 server.registerTool(
   "remove-entity",
