@@ -108,8 +108,10 @@ SYSTEM_INSTRUCTION = (
     "When the user provides music in ABC notation (e.g. X:1, K:C, L:1/4, CDEF GABc|), "
     "call add-abc-track with the abcNotation parameter containing the full ABC string (without markdown). "
     "Extract the raw ABC from code blocks or plain text. Common headers: X:1 (tune number), K:key, L:default note length, "
-    "M:meter. Use the instrument parameter when the user specifies which instrument to play the notes "
-    "(e.g. bassline for bass, space for sampler, heisenberg for synth). Default is heisenberg.\n\n"
+    "M:meter. For orchestral or Gakki sounds (french horn, trumpet, violin, brass, strings, etc.), set instrument to that "
+    "exact phrase (e.g. french horn)—do NOT use the single word gakki alone; that selects the wrong default patch (piano). "
+    "If you must pass instrument as gakki or strings/brass/horn, set orchestralVoice to the user's specific instrument. "
+    "For synth/bass/drums use heisenberg, bassline, machiniste, etc. Default instrument is heisenberg.\n\n"
 
     "GENERAL:\n"
     "Always call the tool immediately when you have enough information; "

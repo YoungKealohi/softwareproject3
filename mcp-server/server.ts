@@ -211,6 +211,16 @@ function resolveInstrumentType(input: string): string | null {
   return bestDist <= 3 ? best : null;
 }
 
+/** Short names / LLM outputs → keys in gakki-instruments.json by_gm_name */
+const GAKKI_NAME_SYNONYMS: Record<string, string> = {
+  horn: "french_horn",
+  brass: "brass_section",
+  strings: "string_ensemble_1",
+  string: "string_ensemble_1",
+  orchestral: "string_ensemble_1",
+  symphonic: "string_ensemble_1",
+};
+
 /**
  * Resolve an instrument name (e.g. "french horn", "trumpet") to a Gakki preset UUID.
  * Uses gakki-instruments.json by_gm_name. Returns undefined if not found.
@@ -221,7 +231,58 @@ function resolveGakkiPresetUuid(instrumentName: string): string | undefined {
     .toLowerCase()
     .replace(/\s+/g, "_")
     .replace(/[()]/g, "");
-  return gakkiByGmName[key];
+  const direct = gakkiByGmName[key];
+  if (direct) return direct;
+  const syn = GAKKI_NAME_SYNONYMS[key];
+  return syn ? gakkiByGmName[syn] : undefined;
+}
+
+/** Match user/ABC text to GM keys (order: multi-word phrases before single words like "horn"). */
+const GAKKI_TEXT_PATTERNS: ReadonlyArray<{ pattern: RegExp; gmKey: string }> = [
+  { pattern: /\bfrench\s+horn\b/i, gmKey: "french_horn" },
+  { pattern: /\benglish\s+horn\b/i, gmKey: "english_horn" },
+  { pattern: /\bmuted\s+trumpet\b/i, gmKey: "muted_trumpet" },
+  { pattern: /\bbrass\s+section\b/i, gmKey: "brass_section" },
+  { pattern: /\bstring\s+ensemble\s*2\b/i, gmKey: "string_ensemble_2" },
+  { pattern: /\bstring\s+ensemble\s*1\b/i, gmKey: "string_ensemble_1" },
+  { pattern: /\btrumpet\b/i, gmKey: "trumpet" },
+  { pattern: /\btrombone\b/i, gmKey: "trombone" },
+  { pattern: /\btuba\b/i, gmKey: "tuba" },
+  { pattern: /\bviolin\b/i, gmKey: "violin" },
+  { pattern: /\bviola\b/i, gmKey: "viola" },
+  { pattern: /\bcello\b/i, gmKey: "cello" },
+  { pattern: /\bcontrabass\b/i, gmKey: "contrabass" },
+  { pattern: /\bflute\b/i, gmKey: "flute" },
+  { pattern: /\bpiccolo\b/i, gmKey: "piccolo" },
+  { pattern: /\boboe\b/i, gmKey: "oboe" },
+  { pattern: /\bclarinet\b/i, gmKey: "clarinet" },
+  { pattern: /\bbassoon\b/i, gmKey: "bassoon" },
+  { pattern: /\bhorn\b/i, gmKey: "french_horn" },
+  { pattern: /\bbrass\b/i, gmKey: "brass_section" },
+  { pattern: /\bstrings\b/i, gmKey: "string_ensemble_1" },
+];
+
+function resolveGakkiPresetUuidFromHints(args: {
+  instrument?: string;
+  orchestralVoice?: string;
+  abcNotation: string;
+}): string | undefined {
+  for (const s of [args.orchestralVoice, args.instrument]) {
+    if (!s?.trim()) continue;
+    const u = resolveGakkiPresetUuid(s);
+    if (u) return u;
+  }
+  const haystack = [
+    args.abcNotation,
+    args.orchestralVoice ?? "",
+    args.instrument ?? "",
+  ].join("\n");
+  for (const { pattern, gmKey } of GAKKI_TEXT_PATTERNS) {
+    if (pattern.test(haystack) && gakkiByGmName[gmKey]) {
+      return gakkiByGmName[gmKey];
+    }
+  }
+  return undefined;
 }
 
 /** Entity types that produce audio and their output field name (for DesktopAudioCable fromSocket). */
@@ -675,7 +736,8 @@ server.registerTool(
       "Parses the ABC string, creates an instrument (or uses an existing note-playing device),",
       "creates a NoteTrack, NoteCollection, NoteRegion, and adds all notes. Call this when the user",
       "provides music in ABC notation (e.g. X:1, K:C, L:1/4, CDEF GABc|).",
-      "Instruments: heisenberg (poly synth), bassline (bass), space (sampler), gakki (strings, french horn, brass),",
+      "Orchestral: use instrument=french horn (etc.) or orchestralVoice; do not use instrument=gakki alone (defaults to piano).",
+      "Other instruments: heisenberg (poly synth), bassline (bass), space (sampler), gakki device for orchestral GM sounds,",
       "pulverisateur, tonematrix, machiniste (drums), matrixArpeggiator.",
     ].join(" "),
     inputSchema: z.object({
@@ -686,7 +748,13 @@ server.registerTool(
         .string()
         .optional()
         .describe(
-          "Instrument to play the notes. One of: heisenberg, bassline, space, gakki, pulverisateur, tonematrix, machiniste, matrixArpeggiator. Aliases: synth, bass, sampler, strings, drums, french horn, trumpet, brass. Default: heisenberg.",
+          "Sound/device for the note player. Prefer the user's exact instrument (e.g. french horn, trumpet, violin)—not the word gakki alone, which defaults to piano. Aliases: heisenberg, bassline, space, gakki, pulverisateur, tonematrix, machiniste, matrixArpeggiator, synth, bass, strings, drums, brass, horn, etc. Default: heisenberg.",
+        ),
+      orchestralVoice: z
+        .string()
+        .optional()
+        .describe(
+          "If instrument is gakki or a vague alias (strings, brass, horn), set the specific orchestral voice the user asked for (e.g. french horn, trumpet). Also repeat it here if the user said it in chat so the correct Gakki preset is applied.",
         ),
       playerEntityId: z
         .string()
@@ -701,6 +769,7 @@ server.registerTool(
   async (args: {
     abcNotation: string;
     instrument?: string;
+    orchestralVoice?: string;
     playerEntityId?: string;
     x?: number;
     y?: number;
@@ -715,6 +784,28 @@ server.registerTool(
 
       const instrumentType =
         resolveInstrumentType(args.instrument ?? "heisenberg") ?? "heisenberg";
+
+      // Gakki: applyPresetTo with preset from API; bare "gakki" has no UUID → default piano without hints.
+      let gakkiPreset: unknown | undefined = undefined;
+      if (!args.playerEntityId && instrumentType === "gakki") {
+        const presetUuid = resolveGakkiPresetUuidFromHints({
+          instrument: args.instrument,
+          orchestralVoice: args.orchestralVoice,
+          abcNotation: args.abcNotation,
+        });
+        if (presetUuid) {
+          const client = await getClient();
+          gakkiPreset = await client.api.presets.get(
+            `presets/${presetUuid}`,
+          );
+        } else {
+          console.error(
+            "[add-abc-track] Gakki device but no preset UUID (instrument=%s orchestralVoice=%s). Default patch may be piano.",
+            args.instrument ?? "",
+            args.orchestralVoice ?? "",
+          );
+        }
+      }
 
       const result = await doc.modify((t) => {
         try {
@@ -734,17 +825,14 @@ server.registerTool(
               positionY: posY,
               displayName: `${instrumentType} ${autoLayoutOffset}`,
             };
-            if (instrumentType === "gakki" && args.instrument) {
-              const presetUuid = resolveGakkiPresetUuid(args.instrument);
-              if (presetUuid) {
-                createOpts.soundfontId = presetUuid;
-              }
-            }
             const player = t.create(instrumentType as any, createOpts);
             if (!player) {
               return {
                 error: `Failed to create ${instrumentType} instrument`,
               };
+            }
+            if (instrumentType === "gakki" && gakkiPreset !== undefined) {
+              (t as any).applyPresetTo(player, gakkiPreset);
             }
             connectDeviceToStagebox(t, player, instrumentType);
             if (instrumentType === "heisenberg") {
