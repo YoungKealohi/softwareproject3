@@ -102,13 +102,31 @@ export const TICKS_WHOLE = 15360;
 export const TICKS_QUARTER = 3840;
 
 /**
+ * LLMs often flatten ABC headers onto one line with spaces (e.g. `X:1 T:Title M:4/4`)
+ * instead of newline-separated lines. abcjs may then yield no notes.
+ * Inserts newlines before standard single-letter ABC information fields.
+ */
+export function normalizeAbcNotation(input: string): string {
+  let s = input.trim();
+  if (!s) return s;
+  // Single-line headers: "X:1 T:Title M:4/4 K:G" -> one field per line
+  s = s.replace(/\s+([A-Z]:)/g, "\n$1");
+  // Body often stuck on same line as K: "K:G |:CDEF|..." — abcjs needs the tune body on a new line
+  s = s.replace(/(K:[^\n]*?)\s+(\|:)/g, "$1\n$2");
+  // Second repeat / section: "| |:g2" -> newline before the next |:
+  s = s.replace(/\|\s+(\|:)/g, "|\n$1");
+  return s;
+}
+
+/**
  * Parse ABC notation and extract notes using abcjs.
  * Returns { pitch, positionTicks, durationTicks, velocity }.
  */
 export function parseAbcToNotes(abcString: string): Array<{ pitch: number; positionTicks: number; durationTicks: number; velocity: number }> {
   const notes: Array<{ pitch: number; positionTicks: number; durationTicks: number; velocity: number }> = [];
   try {
-    const tuneObjs = abcjs.parseOnly(abcString.trim());
+    const normalized = normalizeAbcNotation(abcString);
+    const tuneObjs = abcjs.parseOnly(normalized.trim());
     if (!tuneObjs || tuneObjs.length < 1) {
       throw new Error("No tune found in ABC notation");
     }

@@ -23,6 +23,7 @@ import {
   resolveGakkiPresetUuid,
   resolveGakkiPresetUuidFromHints,
   parseAbcToNotes,
+  normalizeAbcNotation,
   connectDeviceToStagebox,
   setHeisenbergOperatorAGain,
   recommendEntityForStyle,
@@ -552,6 +553,8 @@ server.registerTool(
       "Parses the ABC string, creates an instrument (or uses an existing note-playing device),",
       "creates a NoteTrack, NoteCollection, NoteRegion, and adds all notes. Call this when the user",
       "provides music in ABC notation (e.g. X:1, K:C, L:1/4, CDEF GABc|).",
+      "CRITICAL: abcNotation MUST use newline-separated lines for the header (standard ABC), e.g.",
+      "X:1\\nT:Title\\nM:4/4\\nK:G\\n|:GABc| — do NOT put the whole header on one line with spaces.",
       "Orchestral: use instrument=french horn (etc.) or orchestralVoice; do not use instrument=gakki alone (defaults to piano).",
       "Other instruments: heisenberg, bassline, pulsar, kobolt, space, gakki, ",
       "pulverisateur, tonematrix, machiniste, beatbox8, beatbox9, matrixArpeggiator, etc.",
@@ -559,7 +562,9 @@ server.registerTool(
     inputSchema: z.object({
       abcNotation: z
         .string()
-        .describe("ABC notation string (e.g. X:1\\nK:C\\nL:1/4\\nCDEF GABc|)"),
+        .describe(
+          "Full ABC tune string. MUST use newline characters between information fields (X: T: M: C: K: L: etc.), one field per line, then the body. Example: X:1\\nT:My Tune\\nM:4/4\\nK:G\\n|:GABc|",
+        ),
       instrument: z
         .string()
         .optional()
@@ -615,7 +620,7 @@ server.registerTool(
         const presetUuid = resolveGakkiPresetUuidFromHints({
           instrument: args.instrument,
           orchestralVoice: args.orchestralVoice,
-          abcNotation: args.abcNotation,
+          abcNotation: normalizeAbcNotation(args.abcNotation),
         });
         if (presetUuid) {
           const client = await getClient();

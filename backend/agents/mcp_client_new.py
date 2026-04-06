@@ -60,6 +60,10 @@ def load_system_instruction() -> str:
         "When the user wants AI-generated audio from a text description (e.g. 'make a 15s lo-fi beat'), "
         f"call the `{GENERATE_MUSIC_TOOL_NAME}` tool with their prompt. Do not use this for ABC notation "
         "(use add-abc-track instead).\n\n"
+        "ABC NOTATION:\n"
+        "When calling add-abc-track, pass abcNotation with standard ABC layout: each information field "
+        "on its own line (newlines between X:, T:, M:, K:, L:, etc.), then the tune body. "
+        "Do not put the entire header on one line with spaces—that breaks parsing.\n\n"
         "RESPONSE FORMAT:\n"
         "Always respond in plain text. Do not use any markdown formatting such as "
         "bold (**), italic (*), headers (#), bullet points (-), numbered lists, "
@@ -627,6 +631,7 @@ class MCPClient:
                 model=self._openai_model,
                 messages=request_messages,
                 tools=tools,
+                temperature=0.2,
             )
             choice = response.choices[0] if response.choices else None
             if not choice or not choice.message:
@@ -654,11 +659,23 @@ class MCPClient:
             # Call MCP tools and append tool result messages
             for tc in msg.tool_calls:
                 tool_name = tc.function.name
+                raw_args = tc.function.arguments or "{}"
                 try:
-                    raw_args = tc.function.arguments or "{}"
                     tool_args = json.loads(raw_args)
-                except json.JSONDecodeError:
-                    tool_args = {}
+                except json.JSONDecodeError as e:
+                    print(
+                        f"[MCP Client] JSON decode failed for {tool_name}: {e!s}; raw_args={raw_args!r}"
+                    )
+                    err_msg = (
+                        "Error: could not parse tool arguments as JSON. "
+                        f"Parser error: {e!s}. Return valid JSON object arguments for this tool."
+                    )
+                    request_messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": err_msg,
+                    })
+                    continue
                 print(f"[MCP Client] Calling tool: {tool_name} with args: {tool_args}")
                 trace_id = None
                 if stream_callback:

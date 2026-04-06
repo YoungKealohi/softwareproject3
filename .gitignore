@@ -12,3 +12,6 @@ storage/
 /.cursor
 /.vscode
 /backend/test_output.txt
+/.claude
+/.aiassistant
+/test-results/

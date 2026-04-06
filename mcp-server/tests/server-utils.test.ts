@@ -11,6 +11,7 @@ import {
   resolveGakkiPresetUuid,
   resolveGakkiPresetUuidFromHints,
   parseAbcToNotes,
+  normalizeAbcNotation,
   connectDeviceToStagebox,
   setHeisenbergOperatorAGain,
   recommendEntityForStyle,
@@ -184,6 +185,18 @@ describe('Gakki Preset Resolution', () => {
 // ==================== ABC NOTATION PARSING TESTS ====================
 
 describe('ABC Notation Parsing', () => {
+  it('normalizeAbcNotation inserts newlines before single-letter ABC info fields', () => {
+    expect(normalizeAbcNotation('X:1 T:Title M:4/4 K:G')).toBe('X:1\nT:Title\nM:4/4\nK:G');
+    expect(normalizeAbcNotation('X:1\nT:Already\nK:C')).toBe('X:1\nT:Already\nK:C');
+  });
+
+  it('should parse ABC when headers are flattened onto one line (LLM-style)', () => {
+    const flattened =
+      'X:1 T:Speed the Plough M:4/4 C:Trad. K:G |:GABc dedB|dedB dedB|c2ec B2dB|c2A2 A2BA| GABc dedB|dedB dedB|c2ec B2dB|A2F2 G4:| |:g2gf gdBd|g2f2 e2d2|c2ec B2dB|c2A2 A2df| g2gf g2Bd|g2f2 e2d2|c2ec B2dB|A2F2 G4:|';
+    const notes = parseAbcToNotes(flattened);
+    expect(notes.length).toBeGreaterThan(0);
+  });
+
   it('should parse valid ABC notation and return notes', () => {
     const abcString = 'X:1\nK:C\nL:1/4\nCDEF|';
     const notes = parseAbcToNotes(abcString);
@@ -469,7 +482,7 @@ describe('Constants Integrity', () => {
   });
 
   it('should have all INSTRUMENT_ALIASES pointing to valid note track instruments or gakki/heisenberg', () => {
-    const validTargets = new Set([...NOTE_TRACK_INSTRUMENTS]);
+    const validTargets = new Set<string>(NOTE_TRACK_INSTRUMENTS as readonly string[]);
     for (const [alias, target] of Object.entries(INSTRUMENT_ALIASES)) {
       expect(validTargets.has(target)).toBe(true);
     }
