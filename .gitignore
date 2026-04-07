@@ -8,7 +8,7 @@ mcp-server/node_modules/
 mcp-server/dist/
 mcp-server/package.json
 storage/
-/.ai/mcp/mcp.json
+/.ai
 /.cursor
 /.vscode
 /backend/test_output.txt

@@ -9,6 +9,8 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from services.music_generation import format_elevenlabs_exception
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/music", tags=["music"])
@@ -107,5 +109,5 @@ async def generate_music(request: MusicGenerateRequest) -> MusicGenerateResponse
         logger.exception("ElevenLabs music generation failed")
         raise HTTPException(
             status_code=502,
-            detail=f"Music generation failed: {str(e)}",
+            detail=f"Music generation failed: {format_elevenlabs_exception(e)}",
         )

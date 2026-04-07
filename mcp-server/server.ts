@@ -24,9 +24,11 @@ import {
   resolveGakkiPresetUuidFromHints,
   parseAbcToNotes,
   normalizeAbcNotation,
+  notesToAbc,
   connectDeviceToStagebox,
   setHeisenbergOperatorAGain,
   recommendEntityForStyle,
+  refId,
 } from "./server-utils.js";
 
 // creating server instance
@@ -276,13 +278,15 @@ server.registerTool(
     }
   },
 );
-// add entity tool
+// add entity tool (supports single or batch via optional `entities` array)
 server.registerTool(
   "add-entity",
   {
     description: [
-      "Add an entity (instrument or effect) to the Audiotool project.",
-      "There are many entity types. Here are some examples by role:",
+      "Add one or more entities (instruments or effects) to the Audiotool project.",
+      "SINGLE MODE: provide entityType (and optional properties/x/y/autoConnectToMixer).",
+      "BATCH MODE: provide an `entities` array to create multiple entities in one call.",
+      "Entity types by role:",
       "  - Synths/Generators: 'heisenberg', 'bassline', 'pulsar', 'pulverisateur', 'kobolt', 'space'",
       "  - Drums: 'machiniste', 'beatbox8', 'beatbox9'",
       "  - Logic/Sequencers: 'tonematrix', 'matrixArpeggiator'",
@@ -294,13 +298,14 @@ server.registerTool(
     inputSchema: z.object({
       entityType: z
         .string()
+        .optional()
         .describe(
-          "Type of entity to add. Examples: 'heisenberg', 'bassline', 'machiniste', 'tonematrix', 'stompboxDelay'",
+          "Type of entity to add (single mode). Examples: 'heisenberg', 'bassline', 'machiniste', 'tonematrix', 'stompboxDelay'",
         ),
       properties: z
         .record(z.string(), z.any())
         .optional()
-        .describe("Properties for the entity"),
+        .describe("Properties for the entity (single mode)"),
       x: z
         .number()
         .optional()
@@ -313,156 +318,65 @@ server.registerTool(
         .boolean()
         .optional()
         .default(true)
-        .describe("Whether to automatically connect this device's output to a new mixer channel. Set to false for insert/mastering effects.")
-    }),
-  },
-  async (args: {
-    entityType: string;
-    properties?: Record<string, any>;
-    x?: number;
-    y?: number;
-    autoConnectToMixer?: boolean;
-  }) => {
-    try {
-      const { properties } = args;
-      const resolvedType = resolveEntityType(args.entityType);
-      if (!resolvedType) {
-        const msg = `Unknown entity type: '${args.entityType}'. Valid types: ${VALID_ENTITY_TYPES.join(", ")}`;
-        console.error(`[add-entity] ${msg}`);
-        throw new Error(msg);
-      }
-      if (resolvedType !== args.entityType) {
-        console.error(
-          `[add-entity] Resolved '${args.entityType}' → '${resolvedType}'`,
-        );
-      }
-
-      const posX = args.x ?? autoLayoutOffset * 120;
-      const posY = args.y ?? 0;
-      autoLayoutOffset++;
-
-      console.error(
-        `[add-entity] Adding ${resolvedType} at (${posX}, ${posY})...`,
-      );
-      console.error(
-        `[add-entity] Properties:`,
-        JSON.stringify(properties || {}, null, 2),
-      );
-
-      const doc = await getDocument();
-
-      const result = await doc.modify((t) => {
-        try {
-          const entityProperties = {
-            ...(properties || {}),
-            positionX: posX,
-            positionY: posY,
-            gain: 0.5,
-            displayName: (properties?.displayName as string) ?? `${resolvedType} ${autoLayoutOffset}`,
-          };
-
-          const newEntity = t.create(resolvedType as any, entityProperties);
-
-          if (!newEntity) {
-            return {
-              error: `Failed to create entity: t.create returned undefined`,
-            };
-          }
-
-          if (args.autoConnectToMixer !== false) {
-            connectDeviceToStagebox(t, newEntity, resolvedType);
-          }
-          
-          if (resolvedType === "heisenberg") {
-            setHeisenbergOperatorAGain(t, newEntity, 0.5);
-          }
-
-          return { entity: newEntity };
-        } catch (innerError) {
-          const msg =
-            innerError instanceof Error
-              ? innerError.message
-              : String(innerError);
-          return { error: msg };
-        }
-      });
-
-      if ("error" in result) {
-        throw new Error(result.error as string);
-      }
-
-      const entity = (result as { entity: any }).entity;
-      console.error(
-        `[add-entity] Successfully added ${resolvedType} with ID: ${entity?.id}`,
-      );
-
-      const exportedFields: Record<string, any> = {};
-      if (entity && entity.fields) {
-        const fields = entity.fields as Record<string, any>;
-        for (const [key, field] of Object.entries(fields)) {
-          if (field && typeof field === 'object' && 'value' in field) {
-            exportedFields[key] = field.value;
-          } else if (field && typeof field === 'object' && 'location' in field) {
-            exportedFields[key] = `[Socket/Port: ${field.location}]`;
-          }
-        }
-      }
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Added ${resolvedType} at position (${posX}, ${posY}). Entity ID: ${entity?.id}\nAvailable Fields & Ports:\n${JSON.stringify(exportedFields, null, 2)}`,
-          },
-        ],
-      };
-    } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : String(error);
-      const errorStack = error instanceof Error ? error.stack : undefined;
-      console.error(`[add-entity] ERROR:`, errorMsg);
-      if (errorStack) {
-        console.error(`[add-entity] Stack trace:`, errorStack);
-      }
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Failed to add entity: ${errorMsg}`,
-          },
-        ],
-        isError: true,
-      };
-    }
-  },
-);
-
-// batch-add-entities tool
-server.registerTool(
-  "batch-add-entities",
-  {
-    description: "Add multiple entities to the Audiotool project at once to save time.",
-    inputSchema: z.object({
+        .describe("Whether to automatically connect this device's output to a new mixer channel. Set to false for insert/mastering effects."),
       entities: z.array(z.object({
         entityType: z.string().describe("Type of entity to add"),
         properties: z.record(z.string(), z.any()).optional().describe("Properties"),
         x: z.number().optional().describe("X position (optional)"),
         y: z.number().optional().describe("Y position (optional)"),
-        autoConnectToMixer: z.boolean().optional().default(true).describe("Whether to automatically connect to mixer")
-      })).describe("Array of entities to create")
-    })
+        autoConnectToMixer: z.boolean().optional().default(true).describe("Whether to automatically connect to mixer"),
+      })).optional().describe("Batch mode: array of entities to create in one call. When provided, single-mode params are ignored."),
+    }),
   },
   async (args: {
-    entities: Array<{
+    entityType?: string;
+    properties?: Record<string, any>;
+    x?: number;
+    y?: number;
+    autoConnectToMixer?: boolean;
+    entities?: Array<{
       entityType: string;
       properties?: Record<string, any>;
       x?: number;
       y?: number;
       autoConnectToMixer?: boolean;
-    }>
+    }>;
   }) => {
     try {
+      const itemsToCreate: Array<{
+        entityType: string;
+        properties?: Record<string, any>;
+        x?: number;
+        y?: number;
+        autoConnectToMixer?: boolean;
+      }> = args.entities
+        ? args.entities
+        : [{
+            entityType: args.entityType!,
+            properties: args.properties,
+            x: args.x,
+            y: args.y,
+            autoConnectToMixer: args.autoConnectToMixer,
+          }];
+
+      if (!itemsToCreate[0]?.entityType) {
+        throw new Error("Either 'entityType' (single mode) or 'entities' array (batch mode) must be provided.");
+      }
+
+      const resolvedItems: Array<{ resolvedType: string; posX: number; posY: number; properties?: Record<string, any>; autoConnectToMixer?: boolean }> = [];
+      for (const item of itemsToCreate) {
+        const resolvedType = resolveEntityType(item.entityType);
+        if (!resolvedType) {
+          throw new Error(`Unknown entity type: '${item.entityType}'. Valid types: ${VALID_ENTITY_TYPES.join(", ")}`);
+        }
+        const posX = item.x ?? autoLayoutOffset * 120;
+        const posY = item.y ?? 0;
+        autoLayoutOffset++;
+        resolvedItems.push({ resolvedType, posX, posY, properties: item.properties, autoConnectToMixer: item.autoConnectToMixer });
+      }
+
       const doc = await getDocument();
-      
+
       const modifyResult = await doc.modify((t) => {
         try {
           const entityResults: Array<{
@@ -473,15 +387,8 @@ server.registerTool(
             fields: Record<string, any>;
           }> = [];
 
-          for (const ent of args.entities) {
-            const { properties } = ent;
-            const resolvedType = resolveEntityType(ent.entityType);
-            if (!resolvedType) return { error: `Unknown entity type: '${ent.entityType}'` };
-            
-            const posX = ent.x ?? autoLayoutOffset * 120;
-            const posY = ent.y ?? 0;
-            autoLayoutOffset++;
-            
+          for (const item of resolvedItems) {
+            const { resolvedType, posX, posY, properties } = item;
             const entityProperties = {
               ...(properties || {}),
               positionX: posX,
@@ -489,11 +396,11 @@ server.registerTool(
               gain: 0.5,
               displayName: (properties?.displayName as string) ?? `${resolvedType} ${autoLayoutOffset}`,
             };
-            
+
             const newEntity = t.create(resolvedType as any, entityProperties);
             if (!newEntity) return { error: `Failed to create entity: t.create returned undefined` };
-            
-            if (ent.autoConnectToMixer !== false) {
+
+            if (item.autoConnectToMixer !== false) {
               connectDeviceToStagebox(t, newEntity, resolvedType);
             }
             if (resolvedType === "heisenberg") {
@@ -525,293 +432,358 @@ server.registerTool(
           return { error: innerError instanceof Error ? innerError.message : String(innerError) };
         }
       });
-      
+
       if ("error" in modifyResult) {
         throw new Error(modifyResult.error as string);
       }
-      
+
       const entities = (modifyResult as { ok: true; entities: Array<{ type: string; id: string; posX: number; posY: number; fields: Record<string, any> }> }).entities;
-      let finalString = "Successfully added entities:\n";
+
+      if (entities.length === 1) {
+        const res = entities[0];
+        return {
+          content: [{
+            type: "text",
+            text: `Added ${res.type} at position (${res.posX}, ${res.posY}). Entity ID: ${res.id}\nAvailable Fields & Ports:\n${JSON.stringify(res.fields, null, 2)}`,
+          }],
+        };
+      }
+
+      let finalString = `Successfully added ${entities.length} entities:\n`;
       for (const res of entities) {
         finalString += `- ${res.type} at (${res.posX}, ${res.posY}). Entity ID: ${res.id}\n  Available Fields & Ports: ${JSON.stringify(res.fields)}\n`;
       }
       return { content: [{ type: "text", text: finalString }] };
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
-      console.error(`[batch-add-entities] ERROR:`, errorMsg);
-      return { content: [{ type: "text", text: `Failed to add entities: ${errorMsg}` }], isError: true };
+      console.error(`[add-entity] ERROR:`, errorMsg);
+      return {
+        content: [{ type: "text", text: `Failed to add entity: ${errorMsg}` }],
+        isError: true,
+      };
     }
-  }
+  },
 );
 
-// add-abc-track tool
+// add-abc-track tool (supports single or batch via optional `tracks` array)
 server.registerTool(
   "add-abc-track",
   {
     description: [
-      "Add a note track to the Audiotool DAW from ABC notation.",
-      "Parses the ABC string, creates an instrument (or uses an existing note-playing device),",
-      "creates a NoteTrack, NoteCollection, NoteRegion, and adds all notes. Call this when the user",
-      "provides music in ABC notation (e.g. X:1, K:C, L:1/4, CDEF GABc|).",
+      "Add one or more note tracks to the Audiotool DAW from ABC notation.",
+      "SINGLE MODE: provide abcNotation (and optional instrument/orchestralVoice/playerEntityId/x/y/autoConnectToMixer).",
+      "BATCH MODE: provide a `tracks` array to create multiple ABC tracks in one call.",
+      "Parses ABC strings, creates instruments (or uses existing note-playing devices),",
+      "creates NoteTrack/NoteCollection/NoteRegion entities and adds all notes.",
       "CRITICAL: abcNotation MUST use newline-separated lines for the header (standard ABC), e.g.",
       "X:1\\nT:Title\\nM:4/4\\nK:G\\n|:GABc| — do NOT put the whole header on one line with spaces.",
       "Orchestral: use instrument=french horn (etc.) or orchestralVoice; do not use instrument=gakki alone (defaults to piano).",
-      "Other instruments: heisenberg, bassline, pulsar, kobolt, space, gakki, ",
+      "Other instruments: heisenberg, bassline, pulsar, kobolt, space, gakki,",
       "pulverisateur, tonematrix, machiniste, beatbox8, beatbox9, matrixArpeggiator, etc.",
     ].join(" "),
     inputSchema: z.object({
       abcNotation: z
         .string()
-        .describe(
-          "Full ABC tune string. MUST use newline characters between information fields (X: T: M: C: K: L: etc.), one field per line, then the body. Example: X:1\\nT:My Tune\\nM:4/4\\nK:G\\n|:GABc|",
-        ),
-      instrument: z
-        .string()
         .optional()
-        .describe(
-          "Sound/device for the note player. Prefer the user's exact instrument (e.g. french horn, trumpet, violin)—not the word gakki alone, which defaults to piano. Aliases: heisenberg, bassline, space, gakki, pulverisateur, tonematrix, machiniste, matrixArpeggiator, synth, bass, strings, drums, brass, horn, etc. Default: heisenberg.",
-        ),
-      orchestralVoice: z
-        .string()
-        .optional()
-        .describe(
-          "If instrument is gakki or a vague alias (strings, brass, horn), set the specific orchestral voice the user asked for (e.g. french horn, trumpet). Also repeat it here if the user said it in chat so the correct Gakki preset is applied.",
-        ),
-      playerEntityId: z
-        .string()
-        .optional()
-        .describe(
-          "ID of existing instrument to use. If omitted, a new instrument is created based on the instrument parameter.",
-        ),
-      x: z.number().optional().describe("X position for new instrument (if created)"),
-      y: z.number().optional().describe("Y position for new instrument (if created)"),
-      autoConnectToMixer: z
-        .boolean()
-        .optional()
-        .default(true)
-        .describe(
-          "Whether to automatically connect this instrument's output to a new mixer channel. Set to false if you plan to manually route it through a mastering chain."
-        ),
+        .describe("Full ABC tune string (single mode)."),
+      instrument: z.string().optional().describe("Sound/device for the note player (single mode). Default: heisenberg."),
+      orchestralVoice: z.string().optional().describe("Specific orchestral voice for Gakki presets (single mode)."),
+      playerEntityId: z.string().optional().describe("ID of existing instrument to use (single mode)."),
+      x: z.number().optional().describe("X position for new instrument (single mode)"),
+      y: z.number().optional().describe("Y position for new instrument (single mode)"),
+      autoConnectToMixer: z.boolean().optional().default(true).describe("Whether to auto-connect to mixer. Set false for mastering chains."),
+      tracks: z.array(z.object({
+        abcNotation: z.string().describe("Full ABC tune string"),
+        instrument: z.string().optional().describe("Sound/device for the note player"),
+        orchestralVoice: z.string().optional().describe("Specific orchestral voice for Gakki presets"),
+        playerEntityId: z.string().optional().describe("ID of existing instrument to use"),
+        x: z.number().optional().describe("X position for new instrument"),
+        y: z.number().optional().describe("Y position for new instrument"),
+        autoConnectToMixer: z.boolean().optional().default(true).describe("Whether to auto-connect to mixer"),
+      })).optional().describe("Batch mode: array of ABC tracks to create in one call. When provided, single-mode params are ignored."),
     }),
   },
   async (args: {
-    abcNotation: string;
+    abcNotation?: string;
     instrument?: string;
     orchestralVoice?: string;
     playerEntityId?: string;
     x?: number;
     y?: number;
     autoConnectToMixer?: boolean;
+    tracks?: Array<{
+      abcNotation: string;
+      instrument?: string;
+      orchestralVoice?: string;
+      playerEntityId?: string;
+      x?: number;
+      y?: number;
+      autoConnectToMixer?: boolean;
+    }>;
   }) => {
     try {
-      const notes = parseAbcToNotes(args.abcNotation);
-      if (notes.length === 0) {
-        throw new Error("No notes found in ABC notation");
+      const trackItems = args.tracks
+        ? args.tracks
+        : [{
+            abcNotation: args.abcNotation!,
+            instrument: args.instrument,
+            orchestralVoice: args.orchestralVoice,
+            playerEntityId: args.playerEntityId,
+            x: args.x,
+            y: args.y,
+            autoConnectToMixer: args.autoConnectToMixer,
+          }];
+
+      if (!trackItems[0]?.abcNotation) {
+        throw new Error("Either 'abcNotation' (single mode) or a 'tracks' array (batch mode) must be provided.");
       }
 
       const doc = await getDocument();
 
-      const instrumentType =
-        resolveInstrumentType(args.instrument ?? "heisenberg") ?? "heisenberg";
+      const prepared: Array<{
+        notes: Array<{ positionTicks: number; durationTicks: number; pitch: number; velocity: number }>;
+        instrumentType: string;
+        gakkiPreset: unknown | undefined;
+        playerEntityId?: string;
+        x?: number;
+        y?: number;
+        autoConnectToMixer?: boolean;
+      }> = [];
 
-      // Gakki: applyPresetTo with preset from API; bare "gakki" has no UUID → default piano without hints.
-      let gakkiPreset: unknown | undefined = undefined;
-      if (!args.playerEntityId && instrumentType === "gakki") {
-        const presetUuid = resolveGakkiPresetUuidFromHints({
-          instrument: args.instrument,
-          orchestralVoice: args.orchestralVoice,
-          abcNotation: normalizeAbcNotation(args.abcNotation),
-        });
-        if (presetUuid) {
-          const client = await getClient();
-          gakkiPreset = await client.api.presets.get(
-            `presets/${presetUuid}`,
-          );
-        } else {
-          console.error(
-            "[add-abc-track] Gakki device but no preset UUID (instrument=%s orchestralVoice=%s). Default patch may be piano.",
-            args.instrument ?? "",
-            args.orchestralVoice ?? "",
-          );
+      for (const item of trackItems) {
+        const notes = parseAbcToNotes(item.abcNotation);
+        if (notes.length === 0) {
+          throw new Error("No notes found in ABC notation");
         }
+
+        const instrumentType = resolveInstrumentType(item.instrument ?? "heisenberg") ?? "heisenberg";
+
+        let gakkiPreset: unknown | undefined = undefined;
+        if (!item.playerEntityId && instrumentType === "gakki") {
+          const presetUuid = resolveGakkiPresetUuidFromHints({
+            instrument: item.instrument,
+            orchestralVoice: item.orchestralVoice,
+            abcNotation: normalizeAbcNotation(item.abcNotation),
+          });
+          console.error(
+            `[add-abc-track] gakki preset resolution: instrument=${JSON.stringify(item.instrument)}, ` +
+            `orchestralVoice=${JSON.stringify(item.orchestralVoice)}, ` +
+            `resolvedPresetUuid=${presetUuid ?? "none"}`
+          );
+          if (presetUuid) {
+            const client = await getClient();
+            gakkiPreset = await client.api.presets.get(`presets/${presetUuid}`);
+            console.error(`[add-abc-track] fetched gakki preset for uuid=${presetUuid}, preset loaded=${gakkiPreset != null}`);
+          } else {
+            console.error(`[add-abc-track] WARNING: no gakki preset resolved — instrument will use default sound`);
+          }
+        }
+
+        prepared.push({
+          notes,
+          instrumentType,
+          gakkiPreset,
+          playerEntityId: item.playerEntityId,
+          x: item.x,
+          y: item.y,
+          autoConnectToMixer: item.autoConnectToMixer,
+        });
       }
+
+      const presetApplications: Array<{ entityId: string; preset: unknown }> = [];
 
       const result = await doc.modify((t) => {
         try {
-          let playerLocation: { location: { id: string } };
-          let resolvedPlayerEntityId: string;
-          if (args.playerEntityId) {
-            const playerEntity = t.entities.getEntity(args.playerEntityId);
-            if (!playerEntity) {
-              return { error: `Player entity ${args.playerEntityId} not found` };
-            }
-            playerLocation = playerEntity as any;
-            resolvedPlayerEntityId = args.playerEntityId;
-          } else {
-            const posX = args.x ?? autoLayoutOffset * 120;
-            const posY = args.y ?? 0;
-            autoLayoutOffset++;
-            const createOpts: Record<string, unknown> = {
-              positionX: posX,
-              positionY: posY,
-              displayName: `${instrumentType} ${autoLayoutOffset}`,
-            };
-            const player = t.create(instrumentType as any, createOpts);
-            if (!player) {
-              return {
-                error: `Failed to create ${instrumentType} instrument`,
+          const trackResults: Array<{ noteTrackId: string; noteCount: number; playerEntityId: string }> = [];
+
+          for (const item of prepared) {
+            let playerLocation: { location: { id: string } };
+            let resolvedPlayerEntityId: string;
+
+            if (item.playerEntityId) {
+              const playerEntity = t.entities.getEntity(item.playerEntityId);
+              if (!playerEntity) {
+                return { error: `Player entity ${item.playerEntityId} not found` };
+              }
+              playerLocation = playerEntity as any;
+              resolvedPlayerEntityId = item.playerEntityId;
+            } else {
+              const posX = item.x ?? autoLayoutOffset * 120;
+              const posY = item.y ?? 0;
+              autoLayoutOffset++;
+              const createOpts: Record<string, unknown> = {
+                positionX: posX,
+                positionY: posY,
+                displayName: `${item.instrumentType} ${autoLayoutOffset}`,
               };
+              const player = t.create(item.instrumentType as any, createOpts);
+              if (!player) {
+                return { error: `Failed to create ${item.instrumentType} instrument` };
+              }
+              if (item.instrumentType === "gakki" && item.gakkiPreset !== undefined) {
+                presetApplications.push({ entityId: (player as any).id, preset: item.gakkiPreset });
+              }
+              if (item.autoConnectToMixer !== false) {
+                connectDeviceToStagebox(t, player, item.instrumentType);
+              }
+              if (item.instrumentType === "heisenberg") {
+                setHeisenbergOperatorAGain(t, player, 0.5);
+              }
+              playerLocation = player as any;
+              resolvedPlayerEntityId = (player as any).id;
             }
-            if (instrumentType === "gakki" && gakkiPreset !== undefined) {
-              (t as any).applyPresetTo(player, gakkiPreset);
-            }
-            if (args.autoConnectToMixer !== false) {
-              connectDeviceToStagebox(t, player, instrumentType);
-            }
-            if (instrumentType === "heisenberg") {
-              setHeisenbergOperatorAGain(t, player, 0.5);
-            }
-            playerLocation = player as any;
-            resolvedPlayerEntityId = (player as any).id;
-          }
 
-          const existingTracks = t.entities
-            .ofTypes("noteTrack" as any, "audioTrack" as any, "automationTrack" as any, "patternTrack" as any)
-            .get();
-          const maxTrackOrder = existingTracks.reduce((max: number, tr: any) => {
-            const order = (tr.fields as any).orderAmongTracks?.value ?? 0;
-            return Math.max(max, order);
-          }, -1);
+            const existingTracks = t.entities
+              .ofTypes("noteTrack" as any, "audioTrack" as any, "automationTrack" as any, "patternTrack" as any)
+              .get();
+            const maxTrackOrder = existingTracks.reduce((max: number, tr: any) => {
+              const order = (tr.fields as any).orderAmongTracks?.value ?? 0;
+              return Math.max(max, order);
+            }, -1);
 
-          const noteTrack = t.create("noteTrack" as any, {
-            orderAmongTracks: maxTrackOrder + 1,
-            player: playerLocation.location,
-          });
-          if (!noteTrack) {
-            return { error: "Failed to create NoteTrack" };
-          }
+            const noteTrack = t.create("noteTrack" as any, {
+              orderAmongTracks: maxTrackOrder + 1,
+              player: playerLocation.location,
+            });
+            if (!noteTrack) return { error: "Failed to create NoteTrack" };
 
-          const noteCollection = t.create("noteCollection" as any, {});
-          if (!noteCollection) {
-            return { error: "Failed to create NoteCollection" };
-          }
+            const noteCollection = t.create("noteCollection" as any, {});
+            if (!noteCollection) return { error: "Failed to create NoteCollection" };
 
-          const lastNote = notes[notes.length - 1];
-          const regionEnd =
-            lastNote.positionTicks + lastNote.durationTicks;
-          const regionDuration = Math.max(regionEnd, TICKS_WHOLE);
+            const lastNote = item.notes[item.notes.length - 1];
+            const regionEnd = lastNote.positionTicks + lastNote.durationTicks;
+            const regionDuration = Math.max(regionEnd, TICKS_WHOLE);
 
-          const noteRegion = t.create("noteRegion" as any, {
-            track: (noteTrack as any).location,
-            collection: (noteCollection as any).location,
-            region: {
-              positionTicks: 0,
-              durationTicks: regionDuration,
-              loopDurationTicks: regionDuration,
-              collectionOffsetTicks: 0,
-              loopOffsetTicks: 0,
-            },
-          });
-          if (!noteRegion) {
-            return { error: "Failed to create NoteRegion" };
-          }
-
-          for (const n of notes) {
-            t.create("note" as any, {
+            const noteRegion = t.create("noteRegion" as any, {
+              track: (noteTrack as any).location,
               collection: (noteCollection as any).location,
-              positionTicks: n.positionTicks,
-              durationTicks: n.durationTicks,
-              pitch: n.pitch,
-              velocity: n.velocity,
+              region: {
+                positionTicks: 0,
+                durationTicks: regionDuration,
+                loopDurationTicks: regionDuration,
+                collectionOffsetTicks: 0,
+                loopOffsetTicks: 0,
+              },
+            });
+            if (!noteRegion) return { error: "Failed to create NoteRegion" };
+
+            for (const n of item.notes) {
+              t.create("note" as any, {
+                collection: (noteCollection as any).location,
+                positionTicks: n.positionTicks,
+                durationTicks: n.durationTicks,
+                pitch: n.pitch,
+                velocity: n.velocity,
+              });
+            }
+
+            trackResults.push({
+              noteTrackId: (noteTrack as any).id,
+              noteCount: item.notes.length,
+              playerEntityId: resolvedPlayerEntityId,
             });
           }
 
-          return {
-            noteTrackId: (noteTrack as any).id,
-            noteCount: notes.length,
-            playerEntityId: resolvedPlayerEntityId,
-          };
+          return { ok: true, tracks: trackResults };
         } catch (innerError) {
-          const msg =
-            innerError instanceof Error
-              ? innerError.message
-              : String(innerError);
-          return { error: msg };
+          return { error: innerError instanceof Error ? innerError.message : String(innerError) };
         }
       });
+
+      if (!("error" in result) && presetApplications.length > 0) {
+        console.error(`[add-abc-track] applying ${presetApplications.length} gakki preset(s) in separate transaction`);
+        for (const { entityId, preset } of presetApplications) {
+          await doc.modify((t) => {
+            const entity = t.entities.getEntity(entityId);
+            if (entity) {
+              (t as any).applyPresetTo(entity, preset);
+              console.error(`[add-abc-track] applied preset to gakki entity ${entityId}`);
+            } else {
+              console.error(`[add-abc-track] WARNING: gakki entity ${entityId} not found for preset application`);
+            }
+          });
+        }
+      }
 
       if ("error" in result) {
         throw new Error(result.error as string);
       }
 
-      const { noteTrackId, noteCount, playerEntityId } = result as {
-        noteTrackId: string;
-        noteCount: number;
-        playerEntityId: string;
-      };
-      console.error(
-        `[add-abc-track] Added track with ${noteCount} notes, track ID: ${noteTrackId}, player ID: ${playerEntityId}`,
-      );
+      const tracks = (result as { ok: true; tracks: Array<{ noteTrackId: string; noteCount: number; playerEntityId: string }> }).tracks;
 
-      return {
-        content: [
-          {
+      if (tracks.length === 1) {
+        const tr = tracks[0];
+        return {
+          content: [{
             type: "text",
-            text: `Added ABC track with ${noteCount} notes. NoteTrack ID: ${noteTrackId}. Player Entity ID: ${playerEntityId}`,
-          },
-        ],
-      };
+            text: `Added ABC track with ${tr.noteCount} notes. NoteTrack ID: ${tr.noteTrackId}. Player Entity ID: ${tr.playerEntityId}`,
+          }],
+        };
+      }
+
+      const totalNotes = tracks.reduce((s, tr) => s + tr.noteCount, 0);
+      let output = `Added ${tracks.length} ABC tracks (${totalNotes} notes total):\n`;
+      for (const tr of tracks) {
+        output += `- NoteTrack ID: ${tr.noteTrackId}, ${tr.noteCount} notes, Player: ${tr.playerEntityId}\n`;
+      }
+      return { content: [{ type: "text", text: output }] };
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
       console.error(`[add-abc-track] ERROR:`, errorMsg);
       return {
-        content: [
-          {
-            type: "text",
-            text: `Failed to add ABC track: ${errorMsg}`,
-          },
-        ],
+        content: [{ type: "text", text: `Failed to add ABC track: ${errorMsg}` }],
         isError: true,
       };
     }
   },
 );
 
-// remove entity tool
+// remove entity tool (supports single or batch via optional `entityIDs` array)
 server.registerTool(
   "remove-entity",
   {
-    description: "Remove an entity from the Audiotool project",
+    description: [
+      "Remove one or more entities from the Audiotool project.",
+      "SINGLE MODE: provide entityID.",
+      "BATCH MODE: provide an `entityIDs` array to remove multiple entities in one call.",
+    ].join("\n"),
     inputSchema: z.object({
-      entityID: z.string().describe("ID of the entity to remove"),
+      entityID: z.string().optional().describe("ID of the entity to remove (single mode)"),
+      entityIDs: z.array(z.string()).optional().describe("Batch mode: array of entity IDs to remove in one call. When provided, single-mode entityID is ignored."),
       removeDependencies: z
         .boolean()
         .optional()
         .default(false)
-        .describe(
-          "If true, then any entities that depend/are connected to this one are also removed.",
-        ),
+        .describe("If true, any entities that depend on / are connected to the removed ones are also removed."),
     }),
   },
-  async (args: { entityID: string; removeDependencies?: boolean }) => {
+  async (args: { entityID?: string; entityIDs?: string[]; removeDependencies?: boolean }) => {
     try {
-      const { entityID, removeDependencies } = args;
-      console.error(`[remove-entity] Removing entity ${entityID}...`);
+      const idsToRemove: string[] = args.entityIDs
+        ? args.entityIDs
+        : args.entityID ? [args.entityID] : [];
+
+      if (idsToRemove.length === 0) {
+        throw new Error("Either 'entityID' (single mode) or 'entityIDs' array (batch mode) must be provided.");
+      }
+
+      const { removeDependencies } = args;
+      console.error(`[remove-entity] Removing ${idsToRemove.length} entity(s)...`);
 
       const doc = await getDocument();
 
       const modifyResult = await doc.modify((t) => {
         try {
-          if (removeDependencies) {
-            t.removeWithDependencies(entityID);
-          } else t.remove(entityID);
+          for (const id of idsToRemove) {
+            if (removeDependencies) {
+              t.removeWithDependencies(id);
+            } else {
+              t.remove(id);
+            }
+          }
           return { ok: true };
         } catch (innerError) {
-          const msg =
-            innerError instanceof Error
-              ? innerError.message
-              : String(innerError);
-          return { error: msg };
+          return { error: innerError instanceof Error ? innerError.message : String(innerError) };
         }
       });
 
@@ -819,165 +791,85 @@ server.registerTool(
         throw new Error(modifyResult.error as string);
       }
 
-      console.error(`[remove-entity] Successfully removed entity ${entityID}`);
+      if (idsToRemove.length === 1) {
+        return {
+          content: [{ type: "text", text: `Removed entity with ID ${idsToRemove[0]}` }],
+        };
+      }
 
       return {
-        content: [
-          {
-            type: "text",
-            text: `Removed entity with ID ${entityID}`,
-          },
-        ],
+        content: [{ type: "text", text: `Removed ${idsToRemove.length} entities.` }],
       };
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
       console.error(`[remove-entity] ERROR:`, errorMsg);
       return {
-        content: [
-          {
-            type: "text",
-            text: `Failed to remove entity: ${errorMsg}`,
-          },
-        ],
+        content: [{ type: "text", text: `Failed to remove entity: ${errorMsg}` }],
         isError: true,
       };
     }
   },
 );
-// update entity value tool
-server.registerTool(
-  "update-entity-value",
-  {
-    description: [
-      "Update an entity's parameter/field value. Use ONLY these field names:",
-      "  heisenberg: gain [0-1], glideMs [0-5000], tuneSemitones [-12,12], playModeIndex [1-3], unisonoCount [1-4], unisonoDetuneSemitones [0-1], unisonoStereoSpreadFactor [-1,1], velocityFactor [0-1], operatorDetuneModeIndex [1-2], isActive (bool)",
-      "  bassline: cutoffFrequencyHz [220-12000], filterDecay [0-1], filterEnvelopeModulationDepth [0-1], filterResonance [0-1], accent [0-1], gain [0-1], tuneSemitones [-12,12], waveformIndex [1-2], patternIndex [0-27], isActive (bool)",
-      "  machiniste: globalModulationDepth [-1,1], mainOutputGain [0-1], patternIndex [0-31], isActive (bool)",
-      "  tonematrix: patternIndex [0-7], isActive (bool)",
-      "  stompboxDelay: feedbackFactor [0-1], mix [0-1], stepCount [1-7], stepLengthIndex [1-3], isActive (bool)",
-      "For other entities, use the 'inspect-entity' tool first to discover the exact names of available fields and their types.",
-    ].join("\n"),
-    inputSchema: z.object({
-      entityID: z.string().describe("ID of the entity to update"),
-      fieldName: z
-        .string()
-        .describe(
-          "Name of the field to update. Must be one of the valid fields listed above for the entity's type.",
-        ),
-      value: z.number().describe("New value for the field"),
-    }),
-  },
-  async (args: {
-    entityID: string;
-    fieldName: string;
-    value: string | number | boolean;
-  }) => {
-    try {
-      const { entityID, fieldName, value } = args;
-      const doc = await getDocument();
-
-      const modifyResult = await doc.modify((t) => {
-        try {
-          const entity = t.entities.getEntity(entityID);
-          if (!entity) {
-            return { error: `Entity with ID ${entityID} not found` };
-          }
-
-          const field = (entity.fields as any)[fieldName];
-          if (!field) {
-            return {
-              error: `Field '${fieldName}' not found on entity ${entityID}`,
-            };
-          }
-
-          t.update(field, value);
-          return { ok: true };
-        } catch (innerError) {
-          const msg =
-            innerError instanceof Error
-              ? innerError.message
-              : String(innerError);
-          return { error: msg };
-        }
-      });
-
-      if ("error" in modifyResult) {
-        throw new Error(modifyResult.error as string);
-      }
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Updated ${fieldName} of entity ${entityID} to ${value}`,
-          },
-        ],
-      };
-    } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : String(error);
-      console.error(`[update-entity-value] ERROR:`, errorMsg);
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Failed to update entity value: ${errorMsg}`,
-          },
-        ],
-        isError: true,
-      };
-    }
-  },
-);
-// update entity values (batch) tool
+// update entity values tool (supports single-entity or multi-entity via optional `entities` array)
 server.registerTool(
   "update-entity-values",
   {
     description: [
-      "Update multiple parameters/fields on an entity at once. Use ONLY valid field names for the entity type:",
+      "Update parameter/field values on one or more entities.",
+      "SINGLE ENTITY MODE: provide entityID + updates map.",
+      "MULTI-ENTITY MODE: provide an `entities` array to update fields across multiple entities in one call.",
+      "Use ONLY valid field names for the entity type:",
       "  heisenberg: gain [0-1], glideMs [0-5000], tuneSemitones [-12,12], playModeIndex [1-3], unisonoCount [1-4], unisonoDetuneSemitones [0-1], unisonoStereoSpreadFactor [-1,1], velocityFactor [0-1], operatorDetuneModeIndex [1-2], isActive (bool)",
       "  bassline: cutoffFrequencyHz [220-12000], filterDecay [0-1], filterEnvelopeModulationDepth [0-1], filterResonance [0-1], accent [0-1], gain [0-1], tuneSemitones [-12,12], waveformIndex [1-2], patternIndex [0-27], isActive (bool)",
       "  machiniste: globalModulationDepth [-1,1], mainOutputGain [0-1], patternIndex [0-31], isActive (bool)",
       "  tonematrix: patternIndex [0-7], isActive (bool)",
       "  stompboxDelay: feedbackFactor [0-1], mix [0-1], stepCount [1-7], stepLengthIndex [1-3], isActive (bool)",
-      "For other entities, use the 'inspect-entity' tool (or check the output of add-entity) to discover the exact names of available fields and their types.",
+      "For other entities, use 'inspect-entity' or the output of 'add-entity' to discover exact field names.",
     ].join("\n"),
     inputSchema: z.object({
-      entityID: z.string().describe("ID of the entity to update"),
-      updates: z.record(z.string(), z.union([z.number(), z.boolean()])).describe("Map of field names to new values. e.g. {'gain': 0.5, 'mix': 0.8, 'isActive': false}"),
+      entityID: z.string().optional().describe("ID of the entity to update (single-entity mode)"),
+      updates: z.record(z.string(), z.union([z.number(), z.boolean()])).optional().describe("Map of field names to new values (single-entity mode). e.g. {'gain': 0.5, 'mix': 0.8, 'isActive': false}"),
+      entities: z.array(z.object({
+        entityID: z.string().describe("ID of the entity to update"),
+        updates: z.record(z.string(), z.union([z.number(), z.boolean()])).describe("Map of field names to new values"),
+      })).optional().describe("Multi-entity mode: array of {entityID, updates} objects. When provided, single-mode params are ignored."),
     }),
   },
   async (args: {
-    entityID: string;
-    updates: Record<string, number | boolean>;
+    entityID?: string;
+    updates?: Record<string, number | boolean>;
+    entities?: Array<{ entityID: string; updates: Record<string, number | boolean> }>;
   }) => {
     try {
-      const { entityID, updates } = args;
+      const updatesList: Array<{ entityID: string; updates: Record<string, number | boolean> }> = args.entities
+        ? args.entities
+        : [{ entityID: args.entityID!, updates: args.updates! }];
+
+      if (!updatesList[0]?.entityID || !updatesList[0]?.updates) {
+        throw new Error("Either 'entityID' + 'updates' (single mode) or an 'entities' array (multi-entity mode) must be provided.");
+      }
+
       const doc = await getDocument();
 
       const modifyResult = await doc.modify((t) => {
         try {
-          const entity = t.entities.getEntity(entityID);
-          if (!entity) {
-            return { error: `Entity with ID ${entityID} not found` };
-          }
-
-          const entityFields = entity.fields as Record<string, any>;
-          for (const [fieldName, value] of Object.entries(updates)) {
-            const field = entityFields[fieldName];
-            if (!field) {
-              return {
-                error: `Field '${fieldName}' not found on entity ${entityID}`,
-              };
+          for (const item of updatesList) {
+            const entity = t.entities.getEntity(item.entityID);
+            if (!entity) {
+              return { error: `Entity with ID ${item.entityID} not found` };
             }
-            t.update(field, value);
+            const entityFields = entity.fields as Record<string, any>;
+            for (const [fieldName, value] of Object.entries(item.updates)) {
+              const field = entityFields[fieldName];
+              if (!field) {
+                return { error: `Field '${fieldName}' not found on entity ${item.entityID}` };
+              }
+              t.update(field, value);
+            }
           }
           return { ok: true };
         } catch (innerError) {
-          const msg =
-            innerError instanceof Error
-              ? innerError.message
-              : String(innerError);
-          return { error: msg };
+          return { error: innerError instanceof Error ? innerError.message : String(innerError) };
         }
       });
 
@@ -985,374 +877,297 @@ server.registerTool(
         throw new Error(modifyResult.error as string);
       }
 
-      return {
-        content: [
-          {
+      if (updatesList.length === 1) {
+        const item = updatesList[0];
+        return {
+          content: [{
             type: "text",
-            text: `Updated ${Object.keys(updates).length} fields on entity ${entityID} to new values: ${JSON.stringify(updates)}`,
-          },
-        ],
+            text: `Updated ${Object.keys(item.updates).length} fields on entity ${item.entityID}: ${JSON.stringify(item.updates)}`,
+          }],
+        };
+      }
+
+      const totalFields = updatesList.reduce((s, i) => s + Object.keys(i.updates).length, 0);
+      return {
+        content: [{
+          type: "text",
+          text: `Updated ${totalFields} fields across ${updatesList.length} entities.`,
+        }],
       };
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
       console.error(`[update-entity-values] ERROR:`, errorMsg);
       return {
-        content: [
-          {
-            type: "text",
-            text: `Failed to update entity values: ${errorMsg}`,
-          },
-        ],
+        content: [{ type: "text", text: `Failed to update entity values: ${errorMsg}` }],
         isError: true,
       };
     }
   },
 );
 
-// update entity position tool
+// update entity position tool (supports single or multi-entity via optional `updates` array)
 server.registerTool(
   "update-entity-position",
   {
-    description: "Update an entity's position on the desktop",
+    description: [
+      "Update the position of one or more entities on the desktop.",
+      "SINGLE MODE: provide entityID, x, y.",
+      "MULTI-ENTITY MODE: provide an `updates` array to reposition multiple entities in one call (ideal for organizing layouts).",
+    ].join("\n"),
     inputSchema: z.object({
-      entityID: z.string().describe("ID of the entity to move"),
-      x: z.number().describe("New X position"),
-      y: z.number().describe("New Y position"),
-    }),
-  },
-  async (args: { entityID: string; x: number; y: number }) => {
-    try {
-      const { entityID, x, y } = args;
-      console.error(
-        `[update-entity-position] Moving entity ${entityID} to (${x}, ${y})...`,
-      );
-      const doc = await getDocument();
-
-      const modifyResult = await doc.modify((t) => {
-        try {
-          const entity = t.entities.getEntity(entityID);
-          if (!entity) {
-            return { error: `Entity with ID ${entityID} not found` };
-          }
-
-          const fields = entity.fields as any;
-
-          if (!fields.positionX || !fields.positionY) {
-            return {
-              error: `Entity ${entityID} does not have positionX/positionY fields`,
-            };
-          }
-
-          t.update(fields.positionX, x);
-          t.update(fields.positionY, y);
-          return { ok: true };
-        } catch (innerError) {
-          const msg =
-            innerError instanceof Error
-              ? innerError.message
-              : String(innerError);
-          return { error: msg };
-        }
-      });
-
-      if ("error" in modifyResult) {
-        throw new Error(modifyResult.error as string);
-      }
-
-      console.error(
-        `[update-entity-position] Successfully moved entity ${entityID} to (${x}, ${y})`,
-      );
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Moved entity ${entityID} to position (${x}, ${y})`,
-          },
-        ],
-      };
-    } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : String(error);
-      console.error(`[update-entity-position] ERROR:`, errorMsg);
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Failed to move entity: ${errorMsg}`,
-          },
-        ],
-        isError: true,
-      };
-    }
-  },
-);
-
-// update entity positions (batch) tool
-server.registerTool(
-  "update-entity-positions",
-  {
-    description: "Update the position of multiple entities on the desktop at once. Use this to organize layouts efficiently.",
-    inputSchema: z.object({
+      entityID: z.string().optional().describe("ID of the entity to move (single mode)"),
+      x: z.number().optional().describe("New X position (single mode)"),
+      y: z.number().optional().describe("New Y position (single mode)"),
       updates: z.array(z.object({
         entityID: z.string().describe("ID of the entity to move"),
         x: z.number().describe("New X position"),
         y: z.number().describe("New Y position"),
-      })).describe("List of position updates"),
+      })).optional().describe("Multi-entity mode: array of position updates. When provided, single-mode params are ignored."),
     }),
   },
-  async (args: { updates: Array<{ entityID: string; x: number; y: number }> }) => {
+  async (args: {
+    entityID?: string;
+    x?: number;
+    y?: number;
+    updates?: Array<{ entityID: string; x: number; y: number }>;
+  }) => {
     try {
-      const { updates } = args;
-      console.error(`[update-entity-positions] Moving ${updates.length} entities...`);
+      const updatesList: Array<{ entityID: string; x: number; y: number }> = args.updates
+        ? args.updates
+        : [{ entityID: args.entityID!, x: args.x!, y: args.y! }];
+
+      if (!updatesList[0]?.entityID) {
+        throw new Error("Either 'entityID'+'x'+'y' (single mode) or an 'updates' array (multi-entity mode) must be provided.");
+      }
+
+      console.error(`[update-entity-position] Moving ${updatesList.length} entity(s)...`);
       const doc = await getDocument();
 
       const modifyResult = await doc.modify((t) => {
         try {
-          for (const update of updates) {
+          for (const update of updatesList) {
             const entity = t.entities.getEntity(update.entityID);
             if (!entity) {
               return { error: `Entity with ID ${update.entityID} not found` };
             }
-
             const fields = entity.fields as any;
             if (!fields.positionX || !fields.positionY) {
-              return {
-                error: `Entity ${update.entityID} does not have positionX/positionY fields`,
-              };
+              return { error: `Entity ${update.entityID} does not have positionX/positionY fields` };
             }
-
             t.update(fields.positionX, update.x);
             t.update(fields.positionY, update.y);
           }
           return { ok: true };
         } catch (innerError) {
-          const msg =
-            innerError instanceof Error
-              ? innerError.message
-              : String(innerError);
-          return { error: msg };
-        }
-      });
-
-      if ("error" in modifyResult) {
-        throw new Error(modifyResult.error as string);
-      }
-
-      console.error(`[update-entity-positions] Successfully moved ${updates.length} entities`);
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Moved ${updates.length} entities successfully.`,
-          },
-        ],
-      };
-    } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : String(error);
-      console.error(`[update-entity-positions] ERROR:`, errorMsg);
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Failed to move entities: ${errorMsg}`,
-          },
-        ],
-        isError: true,
-      };
-    }
-  },
-);
-
-// inspect entity tool
-server.registerTool(
-  "inspect-entity",
-  {
-    description: "Inspect an entity to see its available fields/parameters and their current scalar values. Crucial for discovering how to tweak new entities.",
-    inputSchema: z.object({
-      entityID: z.string().describe("ID of the entity to inspect"),
-    }),
-  },
-  async (args: { entityID: string }) => {
-    try {
-      const { entityID } = args;
-      const doc = await getDocument();
-      const entity = doc.queryEntities.get().find((e) => e.id === entityID);
-      
-      if (!entity) {
-        throw new Error(`Entity with ID ${entityID} not found`);
-      }
-
-      const exportedFields: Record<string, any> = {};
-      const fields = entity.fields as Record<string, any>;
-      
-      for (const [key, field] of Object.entries(fields)) {
-        if (field && typeof field === 'object' && 'value' in field) {
-          exportedFields[key] = field.value;
-        } else if (field && typeof field === 'object' && 'location' in field) {
-          exportedFields[key] = `[Socket/Port: ${field.location}]`;
-        }
-      }
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Entity ${entityID} (${entity.entityType}) Fields:\n${JSON.stringify(exportedFields, null, 2)}`,
-          },
-        ],
-      };
-    } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : String(error);
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Failed to inspect entity: ${errorMsg}`,
-          },
-        ],
-        isError: true,
-      };
-    }
-  },
-);
-
-// connect entities tool
-server.registerTool(
-  "connect-entities",
-  {
-    description: "Connect the audio/note output of one entity to the input of another. Use inspect-entity to discover the correct specific field names (like 'audioOutput' and 'audioInput').",
-    inputSchema: z.object({
-      sourceEntityId: z.string().describe("ID of the source entity (e.g. the synthesizer or effect outputting signal)"),
-      sourceField: z.string().describe("Name of the source field (e.g. 'audioOutput' or 'mainOutput')"),
-      targetEntityId: z.string().describe("ID of the target entity (e.g. an effect or mixerChannel receiving signal)"),
-      targetField: z.string().describe("Name of the target field (e.g. 'audioInput' or 'audioInput1')"),
-      cableType: z.string().optional().default("desktopAudioCable").describe("Type of cable to create. Default is 'desktopAudioCable'. For notes, use 'desktopNoteCable'."),
-    }),
-  },
-  async (args) => {
-    try {
-      const { sourceEntityId, sourceField, targetEntityId, targetField, cableType } = args;
-      const doc = await getDocument();
-      
-      const modifyResult = await doc.modify((t) => {
-        try {
-          const sourceEntity = t.entities.getEntity(sourceEntityId);
-          if (!sourceEntity) return { error: `Source entity ${sourceEntityId} not found` };
-          
-          const targetEntity = t.entities.getEntity(targetEntityId);
-          if (!targetEntity) return { error: `Target entity ${targetEntityId} not found` };
-          
-          const sourceSocket = (sourceEntity.fields as any)[sourceField];
-          if (!sourceSocket || !sourceSocket.location) {
-            return { error: `Field '${sourceField}' missing or not a socket on entity ${sourceEntityId}` };
-          }
-          
-          const targetSocket = (targetEntity.fields as any)[targetField];
-          if (!targetSocket || !targetSocket.location) {
-            return { error: `Field '${targetField}' missing or not a socket on entity ${targetEntityId}` };
-          }
-          
-          // Auto-disconnect existing cables targeting this input socket to prevent multiple-pointer validation errors
-          const existingCables = t.entities.ofTypes("desktopAudioCable" as any, "desktopNoteCable" as any).get();
-          for (const cable of existingCables) {
-            const toSock = (cable.fields as any).toSocket;
-            if (toSock && toSock.location && targetSocket.location) {
-              if (toSock.location.id === targetSocket.location.id || toSock.location === targetSocket.location) {
-                t.remove(cable.id);
-              }
-            }
-          }
-
-          const newCable = t.create(cableType as any, {
-            fromSocket: sourceSocket.location,
-            toSocket: targetSocket.location
-          });
-          
-          if (!newCable) return { error: "Failed to create cable" };
-          
-          return { ok: true, cableId: (newCable as any).id };
-        } catch (innerError) {
           return { error: innerError instanceof Error ? innerError.message : String(innerError) };
         }
       });
-      
+
       if ("error" in modifyResult) {
         throw new Error(modifyResult.error as string);
       }
-      
+
+      if (updatesList.length === 1) {
+        const u = updatesList[0];
+        return {
+          content: [{ type: "text", text: `Moved entity ${u.entityID} to position (${u.x}, ${u.y})` }],
+        };
+      }
+
       return {
-        content: [{ type: "text", text: `Connected ${sourceEntityId}.${sourceField} to ${targetEntityId}.${targetField} using ${cableType}. Cable ID: ${(modifyResult as any).cableId}` }],
+        content: [{ type: "text", text: `Moved ${updatesList.length} entities successfully.` }],
       };
-    } catch (err) {
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      console.error(`[update-entity-position] ERROR:`, errorMsg);
       return {
-        content: [{ type: "text", text: `Failed to connect entities: ${err instanceof Error ? err.message : String(err)}` }],
+        content: [{ type: "text", text: `Failed to move entity: ${errorMsg}` }],
         isError: true,
       };
     }
-  }
+  },
 );
 
-// batch connect entities tool
+// inspect entity tool (supports single or batch via optional `entityIDs` array)
 server.registerTool(
-  "batch-connect-entities",
+  "inspect-entity",
   {
-    description: "Connect multiple entity audio/note ports in a single batch operation. Extremely useful for wiring up mastering chains or complex synth pipelines quickly.",
+    description: [
+      "Inspect one or more entities to see available fields/parameters and their current values.",
+      "SINGLE MODE: provide entityID.",
+      "BATCH MODE: provide an `entityIDs` array to inspect multiple entities in one call.",
+      "Crucial for discovering how to tweak entities and finding socket names for routing.",
+    ].join("\n"),
     inputSchema: z.object({
-      connections: z.array(z.object({
-        sourceEntityId: z.string().describe("ID of the source entity (e.g. the synthesizer or effect outputting signal)"),
-        sourceField: z.string().describe("Name of the source field (e.g. 'audioOutput' or 'mainOutput')"),
-        targetEntityId: z.string().describe("ID of the target entity (e.g. an effect or mixerChannel receiving signal)"),
-        targetField: z.string().describe("Name of the target field (e.g. 'audioInput' or 'audioInput1')"),
-        cableType: z.string().optional().default("desktopAudioCable").describe("Type of cable to create. Default is 'desktopAudioCable'. For notes, use 'desktopNoteCable'."),
-      })).describe("Array of connections to create"),
+      entityID: z.string().optional().describe("ID of the entity to inspect (single mode)"),
+      entityIDs: z.array(z.string()).optional().describe("Batch mode: array of entity IDs to inspect in one call. When provided, single-mode entityID is ignored."),
     }),
   },
-  async (args) => {
+  async (args: { entityID?: string; entityIDs?: string[] }) => {
     try {
-      const { connections } = args;
+      const idsToInspect: string[] = args.entityIDs
+        ? args.entityIDs
+        : args.entityID ? [args.entityID] : [];
+
+      if (idsToInspect.length === 0) {
+        throw new Error("Either 'entityID' (single mode) or 'entityIDs' array (batch mode) must be provided.");
+      }
+
       const doc = await getDocument();
-      
+      const allEntities = doc.queryEntities.get();
+
+      const results: Array<{ id: string; type: string; fields: Record<string, any> }> = [];
+      for (const entityID of idsToInspect) {
+        const entity = allEntities.find((e) => e.id === entityID);
+        if (!entity) {
+          throw new Error(`Entity with ID ${entityID} not found`);
+        }
+
+        const exportedFields: Record<string, any> = {};
+        const fields = entity.fields as Record<string, any>;
+        for (const [key, field] of Object.entries(fields)) {
+          if (field && typeof field === 'object' && 'value' in field) {
+            exportedFields[key] = field.value;
+          } else if (field && typeof field === 'object' && 'location' in field) {
+            exportedFields[key] = `[Socket/Port: ${field.location}]`;
+          }
+        }
+
+        results.push({ id: entityID, type: entity.entityType, fields: exportedFields });
+      }
+
+      if (results.length === 1) {
+        const r = results[0];
+        return {
+          content: [{
+            type: "text",
+            text: `Entity ${r.id} (${r.type}) Fields:\n${JSON.stringify(r.fields, null, 2)}`,
+          }],
+        };
+      }
+
+      const output = results.map(r =>
+        `Entity ${r.id} (${r.type}) Fields:\n${JSON.stringify(r.fields, null, 2)}`
+      ).join("\n\n");
+
+      return {
+        content: [{ type: "text", text: output }],
+      };
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      return {
+        content: [{ type: "text", text: `Failed to inspect entity: ${errorMsg}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
+// connect entities tool (supports single or batch via optional `connections` array)
+server.registerTool(
+  "connect-entities",
+  {
+    description: [
+      "Connect audio/note output(s) of entities to input(s) of others.",
+      "SINGLE MODE: provide sourceEntityId, sourceField, targetEntityId, targetField, cableType.",
+      "BATCH MODE: provide a `connections` array to wire multiple routes in one call (ideal for mastering chains or complex pipelines).",
+      "Use inspect-entity to discover the correct socket field names (like 'audioOutput' and 'audioInput').",
+    ].join("\n"),
+    inputSchema: z.object({
+      sourceEntityId: z.string().optional().describe("ID of the source entity (single mode)"),
+      sourceField: z.string().optional().describe("Name of the source field (e.g. 'audioOutput' or 'mainOutput')"),
+      targetEntityId: z.string().optional().describe("ID of the target entity (single mode)"),
+      targetField: z.string().optional().describe("Name of the target field (e.g. 'audioInput' or 'audioInput1')"),
+      cableType: z.string().optional().default("desktopAudioCable").describe("Type of cable to create. Default is 'desktopAudioCable'. For notes, use 'desktopNoteCable'."),
+      connections: z.array(z.object({
+        sourceEntityId: z.string().describe("ID of the source entity"),
+        sourceField: z.string().describe("Name of the source field"),
+        targetEntityId: z.string().describe("ID of the target entity"),
+        targetField: z.string().describe("Name of the target field"),
+        cableType: z.string().optional().default("desktopAudioCable").describe("Cable type"),
+      })).optional().describe("Batch mode: array of connections to create in one call. When provided, single-mode params are ignored."),
+    }),
+  },
+  async (args: {
+    sourceEntityId?: string;
+    sourceField?: string;
+    targetEntityId?: string;
+    targetField?: string;
+    cableType?: string;
+    connections?: Array<{
+      sourceEntityId: string;
+      sourceField: string;
+      targetEntityId: string;
+      targetField: string;
+      cableType?: string;
+    }>;
+  }) => {
+    try {
+      const connectionsList: Array<{
+        sourceEntityId: string;
+        sourceField: string;
+        targetEntityId: string;
+        targetField: string;
+        cableType: string;
+      }> = args.connections
+        ? args.connections.map(c => ({ ...c, cableType: c.cableType || "desktopAudioCable" }))
+        : [{
+            sourceEntityId: args.sourceEntityId!,
+            sourceField: args.sourceField!,
+            targetEntityId: args.targetEntityId!,
+            targetField: args.targetField!,
+            cableType: args.cableType || "desktopAudioCable",
+          }];
+
+      if (!connectionsList[0]?.sourceEntityId) {
+        throw new Error("Either single-mode params (sourceEntityId, etc.) or a `connections` array must be provided.");
+      }
+
+      const doc = await getDocument();
+
       const modifyResult = await doc.modify((t) => {
         try {
           const createdCableIds: string[] = [];
           const socketsWiredInThisBatch = new Set<string>();
-          for (const conn of connections) {
+
+          for (const conn of connectionsList) {
             const { sourceEntityId, sourceField, targetEntityId, targetField, cableType } = conn;
             const sourceEntity = t.entities.getEntity(sourceEntityId);
             if (!sourceEntity) return { error: `Source entity ${sourceEntityId} not found` };
-            
+
             const targetEntity = t.entities.getEntity(targetEntityId);
             if (!targetEntity) return { error: `Target entity ${targetEntityId} not found` };
-            
+
             const sourceSocket = (sourceEntity.fields as any)[sourceField];
             if (!sourceSocket || !sourceSocket.location) {
               return { error: `Field '${sourceField}' missing or not a socket on entity ${sourceEntityId}` };
             }
-            
+
             const targetSocket = (targetEntity.fields as any)[targetField];
             if (!targetSocket || !targetSocket.location) {
               return { error: `Field '${targetField}' missing or not a socket on entity ${targetEntityId}` };
             }
-            
-            // Auto-disconnect existing cables targeting this input socket, BUT ONLY if we haven't wired to it in this batch.
-            if (!socketsWiredInThisBatch.has(targetSocket.location.id)) {
+
+            const targetLocKey = String(targetSocket.location);
+            if (!socketsWiredInThisBatch.has(targetLocKey)) {
               const existingCables = t.entities.ofTypes("desktopAudioCable" as any, "desktopNoteCable" as any).get();
               for (const cable of existingCables) {
                 const toSock = (cable.fields as any).toSocket;
-                if (toSock && toSock.location && targetSocket.location) {
-                  if (toSock.location.id === targetSocket.location.id || toSock.location === targetSocket.location) {
+                if (toSock?.location && targetSocket.location) {
+                  if (toSock.location.equals?.(targetSocket.location) || String(toSock.location) === targetLocKey) {
                     t.remove(cable.id);
                   }
                 }
               }
-              socketsWiredInThisBatch.add(targetSocket.location.id);
+              socketsWiredInThisBatch.add(targetLocKey);
             }
 
-            const newCable = t.create((cableType || "desktopAudioCable") as any, {
+            const newCable = t.create(cableType as any, {
               fromSocket: sourceSocket.location,
-              toSocket: targetSocket.location
+              toSocket: targetSocket.location,
             });
             if (!newCable) return { error: `Failed to create cable for ${sourceEntityId} -> ${targetEntityId}` };
-            
+
             createdCableIds.push((newCable as any).id);
           }
           return { ok: true, cableIds: createdCableIds };
@@ -1360,67 +1175,85 @@ server.registerTool(
           return { error: innerError instanceof Error ? innerError.message : String(innerError) };
         }
       });
-      
+
       if ("error" in modifyResult) {
         throw new Error(modifyResult.error as string);
       }
-      
+
+      const cableIds = (modifyResult as any).cableIds as string[];
+      if (cableIds.length === 1) {
+        const conn = connectionsList[0];
+        return {
+          content: [{ type: "text", text: `Connected ${conn.sourceEntityId}.${conn.sourceField} to ${conn.targetEntityId}.${conn.targetField} using ${conn.cableType}. Cable ID: ${cableIds[0]}` }],
+        };
+      }
+
       return {
-        content: [{ type: "text", text: `Successfully wired ${connections.length} connections. Cable IDs: ${(modifyResult as any).cableIds.join(", ")}` }],
+        content: [{ type: "text", text: `Successfully wired ${cableIds.length} connections. Cable IDs: ${cableIds.join(", ")}` }],
       };
     } catch (err) {
       return {
-        content: [{ type: "text", text: `Failed to batch connect entities: ${err instanceof Error ? err.message : String(err)}` }],
+        content: [{ type: "text", text: `Failed to connect entities: ${err instanceof Error ? err.message : String(err)}` }],
         isError: true,
       };
     }
-  }
+  },
 );
 
-// disconnect entities tool
+// disconnect entities tool (supports single or batch via optional `cableIds` array)
 server.registerTool(
   "disconnect-entities",
   {
-    description: "Remove a cable connection between entities using its cable ID. Use list-entities or inspect-entity beforehand to find cable endpoints if needed, though they are usually reported when created.",
+    description: [
+      "Remove one or more cable connections by cable ID.",
+      "SINGLE MODE: provide cableId.",
+      "BATCH MODE: provide a `cableIds` array to remove multiple cables in one call.",
+    ].join("\n"),
     inputSchema: z.object({
-      cableId: z.string().describe("ID of the cable entity to remove"),
+      cableId: z.string().optional().describe("ID of the cable to remove (single mode)"),
+      cableIds: z.array(z.string()).optional().describe("Batch mode: array of cable IDs to remove in one call. When provided, single-mode cableId is ignored."),
     }),
   },
-  async (args: { cableId: string }) => {
+  async (args: { cableId?: string; cableIds?: string[] }) => {
     try {
-      const { cableId } = args;
+      const idsToRemove: string[] = args.cableIds
+        ? args.cableIds
+        : args.cableId ? [args.cableId] : [];
+
+      if (idsToRemove.length === 0) {
+        throw new Error("Either 'cableId' (single mode) or 'cableIds' array (batch mode) must be provided.");
+      }
+
       const doc = await getDocument();
-      
+
       const modifyResult = await doc.modify((t) => {
         try {
-          t.remove(cableId);
+          for (const id of idsToRemove) {
+            t.remove(id);
+          }
           return { ok: true };
         } catch (innerError) {
           return { error: innerError instanceof Error ? innerError.message : String(innerError) };
         }
       });
-      
+
       if ("error" in modifyResult) {
         throw new Error(modifyResult.error as string);
       }
-      
+
+      if (idsToRemove.length === 1) {
+        return {
+          content: [{ type: "text", text: `Successfully disconnected cable ${idsToRemove[0]}` }],
+        };
+      }
+
       return {
-        content: [
-          {
-            type: "text",
-            text: `Successfully disconnected cable ${cableId}`,
-          },
-        ],
+        content: [{ type: "text", text: `Successfully disconnected ${idsToRemove.length} cables.` }],
       };
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
       return {
-        content: [
-          {
-            type: "text",
-            text: `Failed to disconnect cable: ${errorMsg}`,
-          },
-        ],
+        content: [{ type: "text", text: `Failed to disconnect cable: ${errorMsg}` }],
         isError: true,
       };
     }
@@ -1478,6 +1311,408 @@ server.registerTool(
             text: `Failed to list entities: ${errorMsg}`,
           },
         ],
+        isError: true,
+      };
+    }
+  },
+);
+
+// ─── update-project-config tool ─────────────────────────────────────────────
+server.registerTool(
+  "update-project-config",
+  {
+    description: [
+      "Update global project config values used by the timeline and transport.",
+      "Supports tempo and time signature updates.",
+      "Use this before generating or editing musical content that depends on BPM or meter.",
+    ].join(" "),
+    inputSchema: z.object({
+      tempoBpm: z
+        .number()
+        .optional()
+        .describe("Project tempo in BPM (must be > 0)."),
+      timeSignatureNumerator: z
+        .number()
+        .int()
+        .optional()
+        .describe("Top number of time signature (e.g. 4 in 4/4)."),
+      timeSignatureDenominator: z
+        .number()
+        .int()
+        .optional()
+        .describe("Bottom number of time signature (e.g. 4 in 4/4)."),
+    }),
+  },
+  async (args: {
+    tempoBpm?: number;
+    timeSignatureNumerator?: number;
+    timeSignatureDenominator?: number;
+  }) => {
+    try {
+      const { tempoBpm, timeSignatureNumerator, timeSignatureDenominator } = args;
+      const hasTempo = tempoBpm != null;
+      const hasNumerator = timeSignatureNumerator != null;
+      const hasDenominator = timeSignatureDenominator != null;
+
+      if (!hasTempo && !hasNumerator && !hasDenominator) {
+        throw new Error(
+          "At least one config field must be provided (tempoBpm and/or timeSignatureNumerator+timeSignatureDenominator).",
+        );
+      }
+
+      if (hasNumerator !== hasDenominator) {
+        throw new Error(
+          "Both timeSignatureNumerator and timeSignatureDenominator must be provided together.",
+        );
+      }
+
+      if (hasTempo && tempoBpm! <= 0) {
+        throw new Error("tempoBpm must be greater than 0.");
+      }
+
+      if (hasNumerator && timeSignatureNumerator! <= 0) {
+        throw new Error("timeSignatureNumerator must be greater than 0.");
+      }
+
+      if (hasDenominator && timeSignatureDenominator! <= 0) {
+        throw new Error("timeSignatureDenominator must be greater than 0.");
+      }
+
+      const doc = await getDocument();
+
+      const modifyResult = await doc.modify((t) => {
+        try {
+          const configEntity = t.entities.ofTypes("config" as any).get()[0];
+          if (!configEntity) {
+            return { error: "Config entity not found in project." };
+          }
+
+          const fields = configEntity.fields as any;
+          const appliedUpdates: Record<string, number> = {};
+
+          if (hasTempo) {
+            if (!fields.tempoBpm) {
+              return { error: "Config field 'tempoBpm' not found." };
+            }
+            t.update(fields.tempoBpm, tempoBpm);
+            appliedUpdates.tempoBpm = tempoBpm!;
+          }
+
+          if (hasNumerator && hasDenominator) {
+            if (!fields.signatureNumerator || !fields.signatureDenominator) {
+              return {
+                error:
+                  "Config fields 'signatureNumerator' and/or 'signatureDenominator' not found.",
+              };
+            }
+            t.update(fields.signatureNumerator, timeSignatureNumerator);
+            t.update(fields.signatureDenominator, timeSignatureDenominator);
+            appliedUpdates.timeSignatureNumerator = timeSignatureNumerator!;
+            appliedUpdates.timeSignatureDenominator = timeSignatureDenominator!;
+          }
+
+          return { ok: true, appliedUpdates };
+        } catch (innerError) {
+          return {
+            error:
+              innerError instanceof Error
+                ? innerError.message
+                : String(innerError),
+          };
+        }
+      });
+
+      if ("error" in modifyResult) {
+        throw new Error(modifyResult.error as string);
+      }
+
+      const appliedUpdates = (modifyResult as { ok: true; appliedUpdates: Record<string, number> }).appliedUpdates;
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Updated project config: ${JSON.stringify(appliedUpdates)}`,
+          },
+        ],
+      };
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Failed to update project config: ${errorMsg}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.registerTool(
+  "get-project-summary",
+  {
+    description: [
+      "Return a structured overview of the entire Audiotool project.",
+      "Includes: config (tempo, time signature), all devices (instruments & effects),",
+      "note tracks and audio tracks, cable connections (signal chain), and mixer layout.",
+      "Call this to understand the current state of the project before making context-aware",
+      "decisions such as generating complementary samples, mixing, or mastering.",
+    ].join(" "),
+    inputSchema: z.object({}),
+  },
+  async () => {
+    try {
+      const doc = await getDocument();
+      const allEntities = doc.queryEntities.get();
+
+      // Config
+      const configEntity = allEntities.find((e) => e.entityType === "config");
+      const configFields = configEntity?.fields as any;
+      const config: Record<string, any> = {};
+      if (configFields) {
+        if (configFields.tempoBpm?.value != null) config.tempoBpm = configFields.tempoBpm.value;
+        if (configFields.signatureNumerator?.value != null && configFields.signatureDenominator?.value != null) {
+          config.timeSignature = `${configFields.signatureNumerator.value}/${configFields.signatureDenominator.value}`;
+        }
+      }
+
+      // Devices (instruments & effects visible on the desktop)
+      const validSet = new Set<string>(VALID_ENTITY_TYPES);
+      const devices = allEntities
+        .filter((e) => validSet.has(e.entityType))
+        .map((e) => {
+          const f = e.fields as any;
+          return {
+            id: e.id,
+            type: e.entityType,
+            displayName: f.displayName?.value ?? null,
+            positionX: f.positionX?.value ?? null,
+            positionY: f.positionY?.value ?? null,
+          };
+        });
+
+      // Note tracks
+      const noteTracks = allEntities
+        .filter((e) => e.entityType === "noteTrack")
+        .map((e) => {
+          const f = e.fields as any;
+          return {
+            id: e.id,
+            displayName: f.displayName?.value ?? null,
+            orderAmongTracks: f.orderAmongTracks?.value ?? null,
+            playerEntityId: refId(f.player),
+          };
+        });
+
+      // Audio tracks
+      const audioTracks = allEntities
+        .filter((e) => e.entityType === "audioTrack")
+        .map((e) => {
+          const f = e.fields as any;
+          return {
+            id: e.id,
+            displayName: f.displayName?.value ?? null,
+            orderAmongTracks: f.orderAmongTracks?.value ?? null,
+            playerEntityId: refId(f.player),
+          };
+        });
+
+      // Cable connections (signal chain)
+      const cables = allEntities
+        .filter((e) => e.entityType === "desktopAudioCable" || e.entityType === "desktopNoteCable")
+        .map((e) => {
+          const f = e.fields as any;
+          return {
+            id: e.id,
+            type: e.entityType,
+            from: refId(f.fromSocket),
+            to: refId(f.toSocket),
+          };
+        });
+
+      // Mixer strips
+      const mixerTypes = ["mixerChannel", "mixerMaster", "mixerGroup", "mixerAux", "mixerReverbAux", "mixerDelayAux"];
+      const mixer = allEntities
+        .filter((e) => mixerTypes.includes(e.entityType))
+        .map((e) => {
+          const f = e.fields as any;
+          const dp = f.displayParameters?.fields;
+          return {
+            id: e.id,
+            type: e.entityType,
+            displayName: dp?.displayName?.value ?? null,
+            orderAmongStrips: dp?.orderAmongStrips?.value ?? null,
+          };
+        });
+
+      const summary = { config, devices, noteTracks, audioTracks, cables, mixer };
+      console.error(`[get-project-summary] devices=${devices.length} noteTracks=${noteTracks.length} audioTracks=${audioTracks.length} cables=${cables.length}`);
+
+      return {
+        content: [{ type: "text", text: JSON.stringify(summary, null, 2) }],
+      };
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      console.error(`[get-project-summary] ERROR:`, errorMsg);
+      return {
+        content: [{ type: "text", text: `Failed to get project summary: ${errorMsg}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
+// ─── export-tracks-abc tool ───────────────────────────────────────────────
+server.registerTool(
+  "export-tracks-abc",
+  {
+    description: [
+      "Read existing note tracks from the project and export their note content as ABC notation.",
+      "This lets you see what melodies, chords, and rhythms already exist in the project.",
+      "Use this to analyze musical content before generating complementary parts,",
+      "or to understand the key, scale, and chord progression of existing music.",
+      "Returns one ABC block per note track, including the instrument type.",
+    ].join(" "),
+    inputSchema: z.object({
+      noteTrackId: z
+        .string()
+        .optional()
+        .describe("ID of a specific note track to export. If omitted, all note tracks are exported."),
+    }),
+  },
+  async (args: { noteTrackId?: string }) => {
+    try {
+      const doc = await getDocument();
+      const allEntities = doc.queryEntities.get();
+
+      // Read config for tempo / time signature
+      const configEntity = allEntities.find((e) => e.entityType === "config");
+      const cf = configEntity?.fields as any;
+      const abcConfig = {
+        tempoBpm: cf?.tempoBpm?.value as number | undefined,
+        timeSignatureNum: cf?.signatureNumerator?.value as number | undefined,
+        timeSignatureDen: cf?.signatureDenominator?.value as number | undefined,
+      };
+
+      // Find target note tracks
+      const allNoteTracks = allEntities.filter((e) => e.entityType === "noteTrack");
+      const targetTracks = args.noteTrackId
+        ? allNoteTracks.filter((e) => e.id === args.noteTrackId)
+        : allNoteTracks;
+
+      if (targetTracks.length === 0) {
+        return {
+          content: [{ type: "text", text: args.noteTrackId
+            ? `Note track ${args.noteTrackId} not found.`
+            : "No note tracks found in the project." }],
+        };
+      }
+
+      // Index note regions, collections, and notes
+      const noteRegions = allEntities.filter((e) => e.entityType === "noteRegion");
+      const noteCollections = allEntities.filter((e) => e.entityType === "noteCollection");
+      const noteEntities = allEntities.filter((e) => e.entityType === "note");
+      console.error(
+        `[export-tracks-abc] Entity counts: noteRegions=${noteRegions.length} noteCollections=${noteCollections.length} notes=${noteEntities.length}`,
+      );
+
+      const results: Array<{ trackId: string; instrument: string | null; abc: string; noteCount: number }> = [];
+
+      for (const track of targetTracks) {
+        const tf = track.fields as any;
+        const playerRef = refId(tf.player);
+
+        let instrumentType: string | null = null;
+        if (playerRef) {
+          const playerEntity = allEntities.find((e) => e.id === playerRef);
+          instrumentType = playerEntity?.entityType ?? null;
+        }
+        console.error(
+          `[export-tracks-abc] Track ${track.id}: player=${playerRef} instrument=${instrumentType}`,
+        );
+
+        // Find note regions belonging to this track
+        const trackRegions = noteRegions.filter((r) => {
+          const rf = r.fields as any;
+          const trackRef = refId(rf.track);
+          return trackRef === track.id;
+        });
+        console.error(
+          `[export-tracks-abc]   regions found: ${trackRegions.length}`,
+        );
+
+        const noteEvents: Array<{ pitch: number; positionTicks: number; durationTicks: number; velocity: number }> = [];
+
+        for (const region of trackRegions) {
+          const rf = region.fields as any;
+          const regionOffset = rf.region?.fields?.positionTicks?.value ?? rf.positionTicks?.value ?? 0;
+
+          // Primary field name is "collection" (matches add-abc-track creation).
+          // Fall back to "noteCollection" in case a different Audiotool version uses that name.
+          const collectionRef = refId(rf.collection) ?? refId(rf.noteCollection);
+
+          console.error(
+            `[export-tracks-abc]   region ${region.id}: offset=${regionOffset} collectionRef=${collectionRef}`,
+          );
+
+          let regionNotes: typeof allEntities = [];
+          if (collectionRef) {
+            const collection = noteCollections.find((c) => c.id === collectionRef);
+            if (collection) {
+              regionNotes = noteEntities.filter((n) => {
+                const nf = n.fields as any;
+                const colRef = refId(nf.collection) ?? refId(nf.noteCollection);
+                return colRef === collection.id;
+              });
+            }
+            console.error(
+              `[export-tracks-abc]     via collection: found ${regionNotes.length} notes`,
+            );
+          }
+          // Fallback: notes referencing this region directly
+          if (regionNotes.length === 0) {
+            regionNotes = noteEntities.filter((n) => {
+              const nf = n.fields as any;
+              const regRef = refId(nf.region) ?? refId(nf.noteRegion);
+              return regRef === region.id;
+            });
+            if (regionNotes.length > 0) {
+              console.error(
+                `[export-tracks-abc]     via region fallback: found ${regionNotes.length} notes`,
+              );
+            }
+          }
+
+          for (const noteEntity of regionNotes) {
+            const nf = noteEntity.fields as any;
+            const pitch = nf.pitch?.value ?? 60;
+            const posTicks = (nf.positionTicks?.value ?? 0) + regionOffset;
+            const durTicks = nf.durationTicks?.value ?? TICKS_QUARTER;
+            const velocity = nf.velocity?.value ?? 0.7;
+            noteEvents.push({ pitch, positionTicks: posTicks, durationTicks: durTicks, velocity });
+          }
+        }
+
+        const abc = notesToAbc(noteEvents, abcConfig);
+        results.push({ trackId: track.id, instrument: instrumentType, abc, noteCount: noteEvents.length });
+      }
+
+      const output = results.map((r) => {
+        const label = r.instrument ? `Track ${r.trackId} (${r.instrument})` : `Track ${r.trackId}`;
+        return `--- ${label} [${r.noteCount} notes] ---\n${r.abc}`;
+      }).join("\n\n");
+
+      console.error(`[export-tracks-abc] Exported ${results.length} track(s), total ${results.reduce((s, r) => s + r.noteCount, 0)} notes`);
+      return {
+        content: [{ type: "text", text: output }],
+      };
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      console.error(`[export-tracks-abc] ERROR:`, errorMsg);
+      return {
+        content: [{ type: "text", text: `Failed to export tracks: ${errorMsg}` }],
         isError: true,
       };
     }

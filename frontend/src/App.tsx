@@ -99,6 +99,12 @@ const extractAuthTokens = (clientId: string, redirectUrl: string, scope: string)
   };
 };
 
+const INSTRUMENT_ENTITY_TYPES = new Set([
+  'heisenberg', 'bassline', 'space', 'gakki', 'pulverisateur',
+  'tonematrix', 'machiniste', 'matrixArpeggiator', 'pulsar',
+  'kobolt', 'beatbox8', 'beatbox9', 'centroid', 'rasselbock',
+]);
+
 function getDawContext(doc: SyncedDocument | null): DawContext | undefined {
   if (!doc) return undefined;
   try {
@@ -111,6 +117,17 @@ function getDawContext(doc: SyncedDocument | null): DawContext | undefined {
     const ctx: DawContext = {};
     if (bpm != null) ctx.tempoBpm = bpm;
     if (num != null && den != null) ctx.timeSignature = `${num}/${den}`;
+
+    const instruments = allEntities
+      .filter((e: any) => INSTRUMENT_ENTITY_TYPES.has(e.entityType))
+      .map((e: any) => e.entityType as string);
+    if (instruments.length > 0) ctx.instruments = instruments;
+
+    const trackCount = allEntities.filter(
+      (e: any) => e.entityType === 'noteTrack' || e.entityType === 'audioTrack',
+    ).length;
+    if (trackCount > 0) ctx.trackCount = trackCount;
+
     return Object.keys(ctx).length > 0 ? ctx : undefined;
   } catch {
     return undefined;

@@ -2,7 +2,15 @@
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
-from agents.mcp_client_new import MCPClient
+
+from elevenlabs.core.api_error import ApiError
+
+from agents.mcp_client_new import (
+    MCPClient,
+    SYSTEM_INSTRUCTION,
+    _normalize_music_length_ms,
+    _normalize_music_prompt,
+)
 from google.genai import types
 
 
@@ -182,3 +190,83 @@ async def test_cleanup():
     await client.cleanup()
 
     client.exit_stack.aclose.assert_called_once()
+
+
+def test_normalize_music_prompt_list_and_string():
+    assert _normalize_music_prompt(["a", "b", "c"]) == "a b c"
+    assert _normalize_music_prompt("  x  ") == "x"
+    assert _normalize_music_prompt(42) == "42"
+
+
+def test_normalize_music_length_ms_types():
+    assert _normalize_music_length_ms(None) == 15000
+    assert _normalize_music_length_ms(True) == 15000
+    assert _normalize_music_length_ms(5000.7) == 5001
+    assert _normalize_music_length_ms("5000") == 5000
+    assert _normalize_music_length_ms("  12000.2 ") == 12000
+    assert _normalize_music_length_ms(700_000) == 600_000
+
+
+@pytest.mark.asyncio
+async def test_execute_generate_music_coerces_and_formats_errors():
+    client = MCPClient(llm_provider="gemini")
+    with patch(
+        "agents.mcp_client_new.generate_music_base64", new_callable=AsyncMock
+    ) as mock_gm:
+        mock_gm.return_value = ("Ym9n", "mp3_44100_128", "echo", 5000)
+        text, attach = await client._execute_generate_music(
+            {
+                "prompt": ["lo", "fi"],
+                "music_length_ms": "8000",
+                "force_instrumental": "yes",
+            }
+        )
+        assert "Success" in text
+        assert attach["audio_base64"] == "Ym9n"
+        mock_gm.assert_called_once()
+        assert mock_gm.call_args.kwargs["prompt"] == "lo fi"
+        assert mock_gm.call_args.kwargs["music_length_ms"] == 8000
+        assert mock_gm.call_args.kwargs["force_instrumental"] is True
+
+    with patch(
+        "agents.mcp_client_new.generate_music_base64",
+        new_callable=AsyncMock,
+        side_effect=ApiError(
+            status_code=400, headers={}, body={"detail": "bad prompt"}
+        ),
+    ):
+        text, attach = await client._execute_generate_music({"prompt": "x"})
+        assert attach is None
+        assert "HTTP 400" in text
+        assert "bad prompt" in text
+
+
+def test_system_instruction_includes_mastering_safety_for_audio_tracks():
+    """Instruction should prevent muting imported sample/audio tracks during mastering."""
+    lowered = SYSTEM_INSTRUCTION.lower()
+    assert "mastering safety" in lowered
+    assert "get-project-summary" in lowered
+    assert "audio-track players" in lowered
+    assert "audioDevice".lower() in lowered
+    assert "disconnect" in lowered and "reconnect" in lowered
+
+
+def test_system_instruction_includes_mixing_fx_safety():
+    """Mixing/FX edits should preserve all audible sources like mastering."""
+    lowered = SYSTEM_INSTRUCTION.lower()
+    assert "mixing and fx safety" in lowered
+    assert "audio-track" in lowered or "audio-track players" in lowered
+    assert "update-entity-values" in lowered
+    assert "remove-entity" in lowered
+
+
+def test_mixing_skill_markdown_includes_source_preservation():
+    """04_mixing_and_fx.md should document audio tracks and non-destructive edits."""
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parent.parent / "agents" / "skills" / "04_mixing_and_fx.md"
+    text = path.read_text(encoding="utf-8").lower()
+    assert "source safety" in text
+    assert "audiodevice" in text
+    assert "get-project-summary" in text
+    assert "post-check" in text

@@ -27,6 +27,8 @@ class DawContext(BaseModel):
     """Snapshot of the connected DAW project's musical settings."""
     tempoBpm: Optional[float] = None
     timeSignature: Optional[str] = None
+    instruments: Optional[List[str]] = None
+    trackCount: Optional[int] = None
 
 
 class AgentRequest(BaseModel):

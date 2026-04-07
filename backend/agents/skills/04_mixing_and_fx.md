@@ -1,5 +1,5 @@
 # Mixing & FX
-ENTITY FIELDS REFERENCE (use these EXACT field names with `update-entity-value`):
+ENTITY FIELDS REFERENCE (use these EXACT field names with `update-entity-values`):
 - heisenberg:
   gain [0..1] (volume, default 0.708)
   glideMs [0..5000] (portamento, default 0)
@@ -42,27 +42,42 @@ ENTITY FIELDS REFERENCE (use these EXACT field names with `update-entity-value`)
   isActive (bool, default true)
 
 IMPORTANT: Do NOT invent field names (e.g. 'delayTime', 'frequency').
-For all the other dozens of available entities (stompboxChorus, graphicalEQ, pulsar, beatbox8, etc.), rely on the fields returned in the output of the `add-entity` tool, or use the `inspect-entity` tool first to discover the exact field names.
+For all the other dozens of available entities (stompboxChorus, graphicalEQ, pulsar, beatbox8, etc.), rely on the fields returned in the output of the `add-entity` tool, or use the `inspect-entity` tool first to discover the exact field names. Use `inspect-entity` with `entityIDs` array to inspect multiple entities at once.
 
-When adjusting multiple values on the same entity, ALWAYS use the `update-entity-values` tool to batch the parameter changes into a single turn. Do not call `update-entity-value` sequentially.
+When adjusting values, ALWAYS use `update-entity-values` to batch parameter changes. Use the `entities` array to update fields across multiple entities in a single call.
+
+SOURCE SAFETY (same as mastering):
+- Call `get-project-summary` first and list **every** audible source you must preserve:
+  - **Note tracks:** `playerEntityId` (synths, drum machines, etc.).
+  - **Audio tracks** (e.g. imported ElevenLabs clips): `playerEntityId` points to an **`audioDevice`** in the `devices` list — use that entity's `audioOutput` for routing.
+- **Do not** use `mixerChannel` as an audio source: it has **no** `audioOutput`. The audible source for a sample is the `audioDevice`, not the mixer channel it feeds.
+- When you change routing, **every** source that was previously audible must remain connected through the new path (e.g. `audioMerger` with distinct inputs such as `audioInputA`, `audioInputB`, … or parallel chains that **each** still include **all** sources you intend to hear — never drop a track).
+- **Prefer non-destructive edits:** use `update-entity-values` for parameter tweaks; use targeted `disconnect-entities` / `connect-entities` to insert or reorder one device. Avoid **bulk `remove-entity`** to swap an entire working chain unless the user explicitly asked to delete those devices.
+- **Post-check:** after edits, confirm each intended note-track and audio-track player still has a cable path to the mixer (through your effects or bus). If fewer sources are routed than before, fix it before finishing.
 
 COMMON I/O PORTS:
-To avoid needing to inspect entities just to find socket names, use these standard ports:
-- Instruments (synths/drums): `audioOutput` (sometimes `audioOutput1` and `audioOutput2` if stereo)
-- Stompbox Effects: `audioInput1`, `audioInput2` (inputs) and `audioOutput1`, `audioOutput2` (outputs)
-- Mixer Channels (e.g. mixerChannel): `insertInput` (input from effects), `insertOutput` (output to effects)
-- Stereo Master (mixerMaster): `insertInput`, `insertOutput`
+Socket names vary by device type and version. Prefer the field names returned by `add-entity` or use `inspect-entity` before connecting. Typical patterns:
+- Instruments (synths/drums): `audioOutput` (sometimes `audioOutput1` / `audioOutput2` if stereo).
+- Stompbox effects: often `audioInput` / `audioOutput`; some devices use numbered ports (`audioInput1`, `audioOutput1`, etc.) — **do not assume**; confirm from tool output.
+- Mixer channels (e.g. `mixerChannel`): `insertInput` (input from effects), `insertOutput` (output to effects); for simple routing to a channel strip, `audioInput` is common — verify in `inspect-entity`.
+- Stereo master (`mixerMaster`): `insertInput`, `insertOutput`
 
 MIXING & EFFECT ROUTING WORKFLOW:
 To properly apply insert effects to instruments, use this workflow:
 1. Add the effect entity using `add-entity` (e.g. `add-entity stompboxCompressor`). CRITICAL: Set `autoConnectToMixer: false` if you intend to insert this effect in a manual chain, so it doesn't spawn an annoying duplicate mixer channel.
 2. Use `list-entities` to find the IDs of the effect, the instrument you want to process, and the mixer channels (`mixerChannel`, `mixerMaster`, etc.).
-3. Use `inspect-entity` on the instrument and the effect to find their exact socket names (usually `audioOutput` and `audioInput`).
-4. Route the instrument's output to the effect's input and from the effect to the mixer in a SINGLE turn using the `batch-connect-entities` tool.
-   Example `connections` array entry 1: instrument `audioOutput` -> effect `audioInput1`
-   Example `connections` array entry 2: effect `audioOutput1` -> mixer channel `insertInput`
-Alternatively, wait until `add-entity` returns the ports natively and use those exact names in your `batch-connect-entities` array.
-You can also tweak the mix by tuning faders and effects parameters using `update-entity-values` in batches.
+3. Use `inspect-entity` on the instrument and the effect to find their exact socket names (usually `audioOutput` and `audioInput`). Pass `entityIDs` array to inspect both in one call.
+4. Route the instrument's output to the effect's input and from the effect to the mixer in a SINGLE call using `connect-entities` with the `connections` array.
+   Example pattern: instrument `audioOutput` -> effect input field from `inspect-entity` (often `audioInput`) -> effect output field -> mixer channel `audioInput` or `insertInput` as appropriate.
+Alternatively, wait until `add-entity` returns the ports natively and use those exact names in your `connections` array.
+You can also tweak the mix by tuning faders and effects parameters using `update-entity-values` with the `entities` array to batch updates across multiple devices in one call.
+
+CONTEXT-AWARE MIXING:
+Before applying EQ, compression, or effects, call `get-project-summary` to see what instruments exist and how they're connected. This tells you:
+- Which frequency bands are occupied (bass synth + kick = low-end conflict, needs EQ carving or sidechain).
+- What the current signal chain looks like (avoid duplicate routing).
+- Whether instruments already have effects applied.
+If note tracks exist, call `export-tracks-abc` to check note ranges — a bass line sitting in the 40-100 Hz range needs different EQ treatment than one playing higher notes around 200 Hz.
 
 MIXING RECIPES & ADVICE:
 When asked how to mix specific instruments, use these Audiotool guidelines:

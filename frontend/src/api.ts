@@ -19,6 +19,8 @@ export type LLMProvider = 'gemini' | 'anthropic' | 'openai';
 export type DawContext = {
   tempoBpm?: number;
   timeSignature?: string;
+  instruments?: string[];
+  trackCount?: number;
 };
 
 export type AgentRequest = {

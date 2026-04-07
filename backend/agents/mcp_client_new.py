@@ -18,7 +18,7 @@ from .schema_converter import (
     convert_mcp_schema_to_anthropic,
     convert_mcp_schema_to_openai,
 )
-from services.music_generation import generate_music_base64
+from services.music_generation import format_elevenlabs_exception, generate_music_base64
 
 load_dotenv()
 
@@ -44,6 +44,36 @@ GENERATE_MUSIC_SCHEMA: Dict[str, Any] = {
     "required": ["prompt"],
 }
 
+
+def _normalize_music_prompt(raw: Any) -> str:
+    if raw is None:
+        return ""
+    if isinstance(raw, str):
+        return raw.strip()
+    if isinstance(raw, (list, tuple)):
+        return " ".join(str(x) for x in raw).strip()
+    return str(raw).strip()
+
+
+def _normalize_music_length_ms(raw: Any) -> int:
+    if raw is None:
+        return 15000
+    if isinstance(raw, bool):
+        return 15000
+    try:
+        if isinstance(raw, str):
+            s = raw.strip()
+            if not s:
+                return 15000
+            n = float(s)
+        else:
+            n = float(raw)
+        length = int(round(n))
+    except (TypeError, ValueError):
+        return 15000
+    return max(3000, min(600_000, length))
+
+
 def load_system_instruction() -> str:
     base_instruction = (
         "You are an Audiotool music production assistant. You help users add instruments and "
@@ -55,11 +85,22 @@ def load_system_instruction() -> str:
         "when calling update-entity-position or other entity tools.\n\n"
         "GENERAL:\n"
         "Always call the tool immediately when you have enough information; "
-        "do not ask for parameters the user has not mentioned unless truly ambiguous.\n\n"
+        "do not ask for parameters the user has not mentioned unless truly ambiguous. "
+        "When the user asks to change the tempo/BPM or time signature, call `update-project-config` immediately.\n\n"
         "ELEVENLABS MUSIC:\n"
         "When the user wants AI-generated audio from a text description (e.g. 'make a 15s lo-fi beat'), "
         f"call the `{GENERATE_MUSIC_TOOL_NAME}` tool with their prompt. Do not use this for ABC notation "
-        "(use add-abc-track instead).\n\n"
+        "(use add-abc-track instead). Describe style and mood; if generation fails, retry with a generic "
+        "style description and avoid naming specific tunes or copyrighted titles.\n\n"
+        "MASTERING SAFETY:\n"
+        "Before rewiring for mastering, call get-project-summary and identify all currently audible sources. "
+        "This includes note-track players AND audio-track players (for example audioDevice entities created by imported samples). "
+        "If you disconnect a source cable, reconnect that same source in the replacement chain immediately. "
+        "Do not remove cables unless their replacement routing is planned in the same mastering step.\n\n"
+        "MIXING AND FX SAFETY:\n"
+        "The same source-preservation rules apply when adding or changing mix effects: keep every note-track and audio-track "
+        "player (including audioDevice for samples) routed to the mixer. Prefer update-entity-values and targeted connection "
+        "changes over bulk remove-entity to replace a working effect chain.\n\n"
         "ABC NOTATION:\n"
         "When calling add-abc-track, pass abcNotation with standard ABC layout: each information field "
         "on its own line (newlines between X:, T:, M:, K:, L:, etc.), then the tune body. "
@@ -171,19 +212,11 @@ class MCPClient:
     async def _execute_generate_music(
         self, tool_args: dict
     ) -> Tuple[str, Optional[Dict[str, Any]]]:
-        prompt = (tool_args.get("prompt") or "").strip()
+        prompt = _normalize_music_prompt(tool_args.get("prompt"))
         if not prompt:
             return "Error: prompt is required for music generation.", None
 
-        raw_len = tool_args.get("music_length_ms")
-        if raw_len is None:
-            length = 15000
-        else:
-            try:
-                length = int(raw_len)
-            except (TypeError, ValueError):
-                length = 15000
-        length = max(3000, min(600_000, length))
+        length = _normalize_music_length_ms(tool_args.get("music_length_ms"))
 
         raw_inst = tool_args.get("force_instrumental")
         if raw_inst is None:
@@ -201,7 +234,10 @@ class MCPClient:
                 api_key=self._elevenlabs_api_key,
             )
         except Exception as e:
-            return f"ElevenLabs music generation failed: {e}", None
+            return (
+                f"ElevenLabs music generation failed: {format_elevenlabs_exception(e)}",
+                None,
+            )
 
         summary = (
             f"Success: generated about {length // 1000}s of "
@@ -715,18 +751,21 @@ class MCPClient:
             parts.append(f"Tempo: {daw_context['tempoBpm']} BPM")
         if "timeSignature" in daw_context:
             parts.append(f"Time signature: {daw_context['timeSignature']}")
+        if daw_context.get("instruments"):
+            parts.append(f"Instruments: {', '.join(daw_context['instruments'])}")
+        if daw_context.get("trackCount") is not None:
+            parts.append(f"Track count: {daw_context['trackCount']}")
         if not parts:
             return None
         return (
             "[DAW project context] The user's current project has the following settings: "
             + ", ".join(parts) + ". "
-            "Only incorporate these details into the generate-music-elevenlabs prompt when "
-            "the user explicitly wants the generated sample to match or fit their project. "
-            "If the user just asks for a general sample without mentioning matching the project, "
-            "ignore this context and use only their description. "
-            "When the user wants a matching sample, tell them what you already know from the project "
-            "(BPM, time signature) and suggest they provide additional details like key, genre, mood, "
-            "or instruments to help the sample fit better—unless they already included those details."
+            "If the user asks to change the tempo or time signature, you MUST call `update-project-config` "
+            "with the new values. Do not claim the change was made without calling the tool. "
+            "When the user wants something that fits their project, use get-project-summary "
+            "and export-tracks-abc to gather deeper context (key, chord progression, note ranges) "
+            "before generating. If the user just asks for a general sample without mentioning "
+            "matching the project, ignore this context and use only their description."
         )
 
     async def run_llm_tool_loop(
@@ -735,16 +774,26 @@ class MCPClient:
         resolved_intent_hint: Optional[str] = None,
         daw_context: Optional[Dict[str, Any]] = None,
         stream_callback: Optional[Any] = None,
+        project_config_precall: Optional[str] = None,
     ) -> tuple[str, Optional[Dict[str, Any]]]:
         """Provider-agnostic: run the appropriate LLM + MCP tool loop.
 
         messages: list of {"role": "user"|"model", "content": str} (conversation history).
         resolved_intent_hint: optional hint from recommend-entity-for-style to prepend.
         daw_context: optional dict with DAW project settings (tempoBpm, timeSignature).
+        project_config_precall: optional result text from deterministic update-project-config precall.
 
         Returns (reply_text, generated_music dict or None).
         """
         daw_hint = self._build_daw_context_hint(daw_context)
+
+        precall_hint = None
+        if project_config_precall:
+            precall_hint = (
+                "[System result] update-project-config already ran: "
+                f"{project_config_precall}. Answer the user based on this; "
+                "do not claim changes that failed."
+            )
 
         if self._llm_provider == "anthropic":
             # Convert to Anthropic format: "model" -> "assistant", content as list of text blocks
@@ -753,6 +802,8 @@ class MCPClient:
                 role = "assistant" if m["role"] == "model" else "user"
                 content = m["content"]
                 api_messages.append({"role": role, "content": content})
+            if precall_hint:
+                api_messages.append({"role": "user", "content": precall_hint})
             if resolved_intent_hint:
                 api_messages.append({
                     "role": "user",
@@ -774,6 +825,8 @@ class MCPClient:
             for m in messages:
                 role = "assistant" if m["role"] == "model" else "user"
                 api_messages.append({"role": role, "content": m["content"]})
+            if precall_hint:
+                api_messages.append({"role": "user", "content": precall_hint})
             if resolved_intent_hint:
                 api_messages.append({
                     "role": "user",
@@ -800,6 +853,13 @@ class MCPClient:
             role = msg["role"] if msg["role"] in ("user", "model") else "user"
             contents.append(
                 types.Content(parts=[types.Part.from_text(text=msg["content"])], role=role)
+            )
+        if precall_hint:
+            contents.append(
+                types.Content(
+                    parts=[types.Part.from_text(text=precall_hint)],
+                    role="user",
+                )
             )
         if resolved_intent_hint:
             contents.append(

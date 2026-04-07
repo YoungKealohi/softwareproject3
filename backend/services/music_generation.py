@@ -4,8 +4,94 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import os
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
+
+# Matches backend.routes.music.MusicGenerateRequest.prompt max_length
+MAX_MUSIC_PROMPT_LENGTH = 5000
+_TRUNC_SUFFIX = " [truncated]"
+
+
+def clamp_music_prompt(prompt: str) -> str:
+    """Trim prompt to the same max length as the REST /music/generate route."""
+    if len(prompt) <= MAX_MUSIC_PROMPT_LENGTH:
+        return prompt
+    budget = MAX_MUSIC_PROMPT_LENGTH - len(_TRUNC_SUFFIX)
+    return prompt[: max(0, budget)] + _TRUNC_SUFFIX
+
+
+def _shorten(text: str, limit: int = 800) -> str:
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3] + "..."
+
+
+def _message_from_body(body: Any) -> str:
+    if body is None:
+        return ""
+    if isinstance(body, str):
+        s = body.strip()
+        try:
+            parsed = json.loads(s)
+            if isinstance(parsed, dict):
+                return _message_from_body(parsed)
+        except json.JSONDecodeError:
+            pass
+        return _shorten(s)
+    if isinstance(body, dict):
+        detail = body.get("detail")
+        if isinstance(detail, str):
+            return _shorten(detail)
+        if isinstance(detail, dict):
+            for key in ("message", "msg", "error"):
+                v = detail.get(key)
+                if v:
+                    return _shorten(str(v))
+        for key in ("message", "error", "msg"):
+            v = body.get(key)
+            if v:
+                return _shorten(str(v))
+        return _shorten(str(body))
+    return _shorten(str(body))
+
+
+def _request_id_from_body(body: Any) -> Optional[str]:
+    if isinstance(body, dict):
+        rid = body.get("request_id")
+        if rid:
+            return str(rid)
+        detail = body.get("detail")
+        if isinstance(detail, dict) and detail.get("request_id"):
+            return str(detail["request_id"])
+    return None
+
+
+def format_elevenlabs_exception(exc: BaseException) -> str:
+    """Readable API error for logs and LLM tool results (avoids ApiError's header-heavy __str__)."""
+    status = getattr(exc, "status_code", None)
+    body = getattr(exc, "body", None)
+    if status is None and body is None:
+        return str(exc)
+    parts: list[str] = []
+    if status is not None:
+        parts.append(f"HTTP {status}")
+    msg = _message_from_body(body)
+    if msg:
+        parts.append(msg)
+    rid = _request_id_from_body(body) if isinstance(body, dict) else None
+    if not rid and isinstance(body, str):
+        try:
+            parsed = json.loads(body)
+            rid = _request_id_from_body(parsed)
+        except json.JSONDecodeError:
+            pass
+    if rid:
+        parts.append(f"request_id={rid}")
+    if parts:
+        return "; ".join(parts)
+    return str(exc)
 
 
 def resolve_elevenlabs_api_key(request_key: Optional[str] = None) -> Optional[str]:
@@ -57,6 +143,7 @@ async def generate_music_base64(
             "No ElevenLabs API key: set elevenlabsApiKey in Developer settings or "
             "ELEVENLABS_API_KEY on the server."
         )
+    prompt = clamp_music_prompt(prompt)
     audio = await generate_music_bytes(
         prompt=prompt,
         music_length_ms=music_length_ms,

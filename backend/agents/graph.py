@@ -14,11 +14,13 @@ LangGraph StateGraph so that:
 from __future__ import annotations
 
 import re
+import uuid
 from typing import Any, Dict, Optional, Sequence, TypedDict
 
 from langgraph.graph import END, StateGraph
 
 from .mcp_client_new import MCPClient
+from .project_config_intent import parse_update_project_config_args
 
 
 # ---------------------------------------------------------------------------
@@ -39,6 +41,7 @@ class AgentState(TypedDict, total=False):
     mcp_client: Any
     daw_context: Optional[Dict[str, Any]]
     stream_callback: Optional[Any]
+    project_config_precall: Optional[str]
 
 
 # ---------------------------------------------------------------------------
@@ -56,6 +59,64 @@ async def add_user_turn(state: AgentState) -> dict:
     msgs = list(state.get("messages") or [])
     msgs.append({"role": "user", "content": state["current_query"]})
     return {"messages": msgs, "resolved_intent": None}
+
+
+async def apply_project_config_precall(state: AgentState) -> dict:
+    """If the user message requests tempo/signature changes, call MCP directly."""
+    query = state.get("current_query", "")
+    args = parse_update_project_config_args(query)
+    if not args:
+        return {}
+
+    client: MCPClient = state["mcp_client"]
+    stream_callback = state.get("stream_callback")
+
+    trace_id = str(uuid.uuid4())
+    tool_name = "update-project-config"
+    if stream_callback:
+        await stream_callback({
+            "type": "trace",
+            "data": {
+                "id": trace_id,
+                "label": tool_name,
+                "detail": str(args),
+                "status": "running",
+            },
+        })
+
+    if client.session is None:
+        msg = "MCP session not connected."
+        if stream_callback:
+            await stream_callback({
+                "type": "trace_update",
+                "data": {"id": trace_id, "status": "error", "detail": msg},
+            })
+        return {"project_config_precall": f"Failed: {msg}"}
+
+    try:
+        result = await client.session.call_tool(tool_name, args)
+        text = MCPClient._extract_tool_result(result)
+        if getattr(result, "isError", False):
+            if stream_callback:
+                await stream_callback({
+                    "type": "trace_update",
+                    "data": {"id": trace_id, "status": "error", "detail": text},
+                })
+            return {"project_config_precall": f"Failed: {text}"}
+        if stream_callback:
+            await stream_callback({
+                "type": "trace_update",
+                "data": {"id": trace_id, "status": "done", "detail": "Completed"},
+            })
+        return {"project_config_precall": f"Success: {text}"}
+    except Exception as exc:
+        err = str(exc)
+        if stream_callback:
+            await stream_callback({
+                "type": "trace_update",
+                "data": {"id": trace_id, "status": "error", "detail": err},
+            })
+        return {"project_config_precall": f"Failed: {err}"}
 
 
 async def resolve_synth_intent(state: AgentState) -> dict:
@@ -83,12 +144,16 @@ async def run_llm_tools(state: AgentState) -> dict:
     resolved_intent = state.get("resolved_intent")
     daw_context = state.get("daw_context")
     stream_callback = state.get("stream_callback")
+    project_config_precall = state.get("project_config_precall")
 
+    # Pass a copy so the LLM loop does not share the same list we append to below
+    # (avoids mutating call_args captured by mocks in tests).
     reply, generated_music = await client.run_llm_tool_loop(
-        messages, 
+        list(messages),
         resolved_intent_hint=resolved_intent,
         daw_context=daw_context,
-        stream_callback=stream_callback
+        stream_callback=stream_callback,
+        project_config_precall=project_config_precall,
     )
     messages.append({"role": "model", "content": reply})
     return {"messages": messages, "reply": reply, "generated_music": generated_music}
@@ -115,13 +180,15 @@ def _build_agent_graph():
     graph = StateGraph(AgentState)
 
     graph.add_node("add_user_turn", add_user_turn)
+    graph.add_node("apply_project_config_precall", apply_project_config_precall)
     graph.add_node("resolve_synth_intent", resolve_synth_intent)
     graph.add_node("run_llm_tools", run_llm_tools)
 
     graph.set_entry_point("add_user_turn")
+    graph.add_edge("add_user_turn", "apply_project_config_precall")
 
     graph.add_conditional_edges(
-        "add_user_turn",
+        "apply_project_config_precall",
         should_resolve_intent,
         {
             "resolve_synth_intent": "resolve_synth_intent",
@@ -165,6 +232,7 @@ async def run_agent_graph(
         "messages": list(history) if history else [],
         "current_query": query,
         "resolved_intent": None,
+        "project_config_precall": None,
         "reply": "",
         "generated_music": None,
         "mcp_client": client,

@@ -12,6 +12,9 @@ import {
   resolveGakkiPresetUuidFromHints,
   parseAbcToNotes,
   normalizeAbcNotation,
+  midiPitchToAbc,
+  ticksToAbcDuration,
+  notesToAbc,
   connectDeviceToStagebox,
   setHeisenbergOperatorAGain,
   recommendEntityForStyle,
@@ -23,8 +26,10 @@ import {
   TICKS_WHOLE,
   TICKS_QUARTER,
   GAKKI_NAME_SYNONYMS,
+  GAKKI_TEXT_PATTERNS,
   STYLE_MAP,
   gakkiByGmName,
+  refId,
 } from '../server-utils.js';
 
 // ==================== LEVENSHTEIN DISTANCE TESTS ====================
@@ -180,6 +185,56 @@ describe('Gakki Preset Resolution', () => {
     // No orchestral text in ABC, so undefined
     expect(result).toBeUndefined();
   });
+
+  it('should have piano-related synonym entries', () => {
+    expect(GAKKI_NAME_SYNONYMS['piano']).toBe('acoustic_grand_piano');
+    expect(GAKKI_NAME_SYNONYMS['grand_piano']).toBe('acoustic_grand_piano');
+    expect(GAKKI_NAME_SYNONYMS['acoustic_piano']).toBe('acoustic_grand_piano');
+    expect(GAKKI_NAME_SYNONYMS['electric_piano']).toBe('electric_piano_1');
+  });
+
+  it('should resolve "piano" via synonym lookup', () => {
+    const result = resolveGakkiPresetUuid('piano');
+    if (Object.keys(gakkiByGmName).length > 0) {
+      expect(result).toBe(gakkiByGmName['acoustic_grand_piano']);
+    }
+  });
+
+  it('should resolve "grand_piano" via synonym lookup', () => {
+    const result = resolveGakkiPresetUuid('grand piano');
+    if (Object.keys(gakkiByGmName).length > 0) {
+      expect(result).toBe(gakkiByGmName['acoustic_grand_piano']);
+    }
+  });
+
+  it('should resolve "electric_piano" via synonym lookup', () => {
+    const result = resolveGakkiPresetUuid('electric piano');
+    if (Object.keys(gakkiByGmName).length > 0) {
+      expect(result).toBe(gakkiByGmName['electric_piano_1']);
+    }
+  });
+
+  it('should have piano-related text patterns', () => {
+    const pianoPattern = GAKKI_TEXT_PATTERNS.find(p => p.gmKey === 'acoustic_grand_piano' && p.pattern.test('piano'));
+    expect(pianoPattern).toBeDefined();
+
+    const electricPianoPattern = GAKKI_TEXT_PATTERNS.find(p => p.gmKey === 'electric_piano_1' && p.pattern.test('electric piano'));
+    expect(electricPianoPattern).toBeDefined();
+
+    const grandPianoPattern = GAKKI_TEXT_PATTERNS.find(p => p.gmKey === 'acoustic_grand_piano' && p.pattern.test('grand piano'));
+    expect(grandPianoPattern).toBeDefined();
+  });
+
+  it('should resolve piano from orchestralVoice hint via resolveGakkiPresetUuidFromHints', () => {
+    const result = resolveGakkiPresetUuidFromHints({
+      instrument: 'gakki',
+      orchestralVoice: 'piano',
+      abcNotation: 'X:1\nK:C\nCDEF|',
+    });
+    if (Object.keys(gakkiByGmName).length > 0) {
+      expect(result).toBe(gakkiByGmName['acoustic_grand_piano']);
+    }
+  });
 });
 
 // ==================== ABC NOTATION PARSING TESTS ====================
@@ -331,6 +386,10 @@ describe('Audio Output Field Mapping', () => {
   it('should map bandSplitter to highOutput', () => {
     expect(AUDIO_OUTPUT_FIELD['bandSplitter']).toBe('highOutput');
   });
+
+  it('should map audioDevice to audioOutput', () => {
+    expect(AUDIO_OUTPUT_FIELD['audioDevice']).toBe('audioOutput');
+  });
 });
 
 // ==================== CONNECT DEVICE TO STAGEBOX TESTS ====================
@@ -469,6 +528,10 @@ describe('setHeisenbergOperatorAGain', () => {
 // ==================== CONSTANTS INTEGRITY TESTS ====================
 
 describe('Constants Integrity', () => {
+  it('should include audioDevice in VALID_ENTITY_TYPES', () => {
+    expect(VALID_ENTITY_TYPES).toContain('audioDevice');
+  });
+
   it('should have all NOTE_TRACK_INSTRUMENTS in VALID_ENTITY_TYPES', () => {
     for (const inst of NOTE_TRACK_INSTRUMENTS) {
       expect(VALID_ENTITY_TYPES).toContain(inst);
@@ -500,5 +563,188 @@ describe('Constants Integrity', () => {
     for (const [key, rec] of Object.entries(STYLE_MAP)) {
       expect(validSet.has(rec.entityType)).toBe(true);
     }
+  });
+});
+
+// ==================== midiPitchToAbc TESTS ====================
+
+describe('midiPitchToAbc', () => {
+  it('should convert middle C (MIDI 60) to "C"', () => {
+    expect(midiPitchToAbc(60)).toBe('C');
+  });
+
+  it('should convert MIDI 72 (C5) to lowercase "c"', () => {
+    expect(midiPitchToAbc(72)).toBe('c');
+  });
+
+  it('should convert MIDI 48 (C3) to "C,"', () => {
+    expect(midiPitchToAbc(48)).toBe('C,');
+  });
+
+  it('should convert MIDI 36 (C2) to "C,,"', () => {
+    expect(midiPitchToAbc(36)).toBe('C,,');
+  });
+
+  it('should convert MIDI 84 (C6) to "c\'"', () => {
+    expect(midiPitchToAbc(84)).toBe("c'");
+  });
+
+  it('should handle sharps with ^', () => {
+    expect(midiPitchToAbc(61)).toBe('^C');
+    expect(midiPitchToAbc(73)).toBe('^c');
+  });
+
+  it('should convert natural notes correctly across octave 4', () => {
+    expect(midiPitchToAbc(60)).toBe('C');
+    expect(midiPitchToAbc(62)).toBe('D');
+    expect(midiPitchToAbc(64)).toBe('E');
+    expect(midiPitchToAbc(65)).toBe('F');
+    expect(midiPitchToAbc(67)).toBe('G');
+    expect(midiPitchToAbc(69)).toBe('A');
+    expect(midiPitchToAbc(71)).toBe('B');
+  });
+
+  it('should handle MIDI 0 (very low pitch)', () => {
+    const result = midiPitchToAbc(0);
+    expect(result).toBe('C,,,,,');
+  });
+});
+
+// ==================== ticksToAbcDuration TESTS ====================
+
+describe('ticksToAbcDuration', () => {
+  const EIGHTH = TICKS_QUARTER / 2; // 1920
+
+  it('should return empty string for one unit (eighth note)', () => {
+    expect(ticksToAbcDuration(EIGHTH, EIGHTH)).toBe('');
+  });
+
+  it('should return "2" for a quarter note (2 eighths)', () => {
+    expect(ticksToAbcDuration(TICKS_QUARTER, EIGHTH)).toBe('2');
+  });
+
+  it('should return "4" for a half note', () => {
+    expect(ticksToAbcDuration(TICKS_QUARTER * 2, EIGHTH)).toBe('4');
+  });
+
+  it('should return "8" for a whole note', () => {
+    expect(ticksToAbcDuration(TICKS_WHOLE, EIGHTH)).toBe('8');
+  });
+
+  it('should return "/2" for a sixteenth note', () => {
+    expect(ticksToAbcDuration(TICKS_QUARTER / 4, EIGHTH)).toBe('/2');
+  });
+
+  it('should return "3" for a dotted quarter (3 eighths)', () => {
+    expect(ticksToAbcDuration(EIGHTH * 3, EIGHTH)).toBe('3');
+  });
+});
+
+// ==================== notesToAbc TESTS ====================
+
+describe('notesToAbc', () => {
+  it('should produce valid ABC header for empty notes', () => {
+    const abc = notesToAbc([]);
+    expect(abc).toContain('X:1');
+    expect(abc).toContain('M:4/4');
+    expect(abc).toContain('L:1/8');
+    expect(abc).toContain('K:C');
+  });
+
+  it('should convert a single quarter-note C4', () => {
+    const abc = notesToAbc([
+      { pitch: 60, positionTicks: 0, durationTicks: TICKS_QUARTER, velocity: 0.7 },
+    ]);
+    expect(abc).toContain('C2');
+    expect(abc).toContain('|]');
+  });
+
+  it('should insert a rest for a gap', () => {
+    const abc = notesToAbc([
+      { pitch: 60, positionTicks: TICKS_QUARTER, durationTicks: TICKS_QUARTER, velocity: 0.7 },
+    ]);
+    expect(abc).toContain('z2');
+    expect(abc).toContain('C2');
+  });
+
+  it('should group simultaneous notes into chords', () => {
+    const abc = notesToAbc([
+      { pitch: 60, positionTicks: 0, durationTicks: TICKS_QUARTER, velocity: 0.7 },
+      { pitch: 64, positionTicks: 0, durationTicks: TICKS_QUARTER, velocity: 0.7 },
+      { pitch: 67, positionTicks: 0, durationTicks: TICKS_QUARTER, velocity: 0.7 },
+    ]);
+    expect(abc).toContain('[CEG]2');
+  });
+
+  it('should use custom tempo and time signature from config', () => {
+    const abc = notesToAbc([], { tempoBpm: 140, timeSignatureNum: 3, timeSignatureDen: 4 });
+    expect(abc).toContain('Q:1/4=140');
+    expect(abc).toContain('M:3/4');
+  });
+
+  it('should insert bar lines at measure boundaries', () => {
+    const ticksPerBar = TICKS_WHOLE; // 4/4 = one whole note per bar
+    const notes = [
+      { pitch: 60, positionTicks: 0, durationTicks: TICKS_QUARTER, velocity: 0.7 },
+      { pitch: 62, positionTicks: TICKS_QUARTER, durationTicks: TICKS_QUARTER, velocity: 0.7 },
+      { pitch: 64, positionTicks: TICKS_QUARTER * 2, durationTicks: TICKS_QUARTER, velocity: 0.7 },
+      { pitch: 65, positionTicks: TICKS_QUARTER * 3, durationTicks: TICKS_QUARTER, velocity: 0.7 },
+      { pitch: 67, positionTicks: ticksPerBar, durationTicks: TICKS_QUARTER, velocity: 0.7 },
+    ];
+    const abc = notesToAbc(notes);
+    expect(abc).toContain('|');
+    const body = abc.split('K:C\n')[1];
+    expect(body).toContain('C2 D2 E2 F2 | G2');
+  });
+
+  it('should round-trip with parseAbcToNotes for a simple scale', () => {
+    const original = [
+      { pitch: 60, positionTicks: 0, durationTicks: TICKS_QUARTER, velocity: 0.7 },
+      { pitch: 62, positionTicks: TICKS_QUARTER, durationTicks: TICKS_QUARTER, velocity: 0.7 },
+      { pitch: 64, positionTicks: TICKS_QUARTER * 2, durationTicks: TICKS_QUARTER, velocity: 0.7 },
+      { pitch: 65, positionTicks: TICKS_QUARTER * 3, durationTicks: TICKS_QUARTER, velocity: 0.7 },
+    ];
+    const abc = notesToAbc(original);
+    const parsed = parseAbcToNotes(abc);
+    expect(parsed.length).toBe(4);
+    for (let i = 0; i < original.length; i++) {
+      expect(parsed[i].pitch).toBe(original[i].pitch);
+      expect(parsed[i].positionTicks).toBe(original[i].positionTicks);
+      expect(parsed[i].durationTicks).toBe(original[i].durationTicks);
+    }
+  });
+});
+
+// ==================== refId HELPER TESTS ====================
+
+describe('refId', () => {
+  it('should extract entityId from a NexusLocation-style value', () => {
+    const field = { value: { entityId: 'abc-123', entityType: 'noteTrack' } };
+    expect(refId(field)).toBe('abc-123');
+  });
+
+  it('should return string value directly', () => {
+    const field = { value: 'some-string-id' };
+    expect(refId(field)).toBe('some-string-id');
+  });
+
+  it('should return null for null/undefined field', () => {
+    expect(refId(null)).toBeNull();
+    expect(refId(undefined)).toBeNull();
+  });
+
+  it('should return null when field has no value', () => {
+    expect(refId({})).toBeNull();
+    expect(refId({ location: { entityId: 'x' } })).toBeNull();
+  });
+
+  it('should return null when value has no entityId', () => {
+    const field = { value: { somethingElse: 42 } };
+    expect(refId(field)).toBeNull();
+  });
+
+  it('should handle field with numeric value gracefully', () => {
+    const field = { value: 42 };
+    expect(refId(field)).toBeNull();
   });
 });

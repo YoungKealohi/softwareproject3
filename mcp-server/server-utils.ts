@@ -21,7 +21,7 @@ try {
 }
 
 export const VALID_ENTITY_TYPES = [
-  "audioMerger", "audioSplitter", "autoFilter", "bandSplitter",
+  "audioDevice", "audioMerger", "audioSplitter", "autoFilter", "bandSplitter",
   "bassline", "beatbox8", "beatbox9", "centroid", "crossfader", "curve", "exciter",
   "gakki", "graphicalEQ", "gravity", "heisenberg", "helmholtz", "kobolt", "machiniste",
   "matrixArpeggiator", "minimixer", "noteSplitter", "panorama", "pulsar", "pulverisateur",
@@ -235,6 +235,10 @@ export const GAKKI_NAME_SYNONYMS: Record<string, string> = {
   string: "string_ensemble_1",
   orchestral: "string_ensemble_1",
   symphonic: "string_ensemble_1",
+  piano: "acoustic_grand_piano",
+  grand_piano: "acoustic_grand_piano",
+  acoustic_piano: "acoustic_grand_piano",
+  electric_piano: "electric_piano_1",
 };
 
 /**
@@ -260,6 +264,9 @@ export const GAKKI_TEXT_PATTERNS: ReadonlyArray<{ pattern: RegExp; gmKey: string
   { pattern: /\bbrass\s+section\b/i, gmKey: "brass_section" },
   { pattern: /\bstring\s+ensemble\s*2\b/i, gmKey: "string_ensemble_2" },
   { pattern: /\bstring\s+ensemble\s*1\b/i, gmKey: "string_ensemble_1" },
+  { pattern: /\bacoustic\s+piano\b/i, gmKey: "acoustic_grand_piano" },
+  { pattern: /\belectric\s+piano\b/i, gmKey: "electric_piano_1" },
+  { pattern: /\bgrand\s+piano\b/i, gmKey: "acoustic_grand_piano" },
   { pattern: /\btrumpet\b/i, gmKey: "trumpet" },
   { pattern: /\btrombone\b/i, gmKey: "trombone" },
   { pattern: /\btuba\b/i, gmKey: "tuba" },
@@ -275,6 +282,7 @@ export const GAKKI_TEXT_PATTERNS: ReadonlyArray<{ pattern: RegExp; gmKey: string
   { pattern: /\bhorn\b/i, gmKey: "french_horn" },
   { pattern: /\bbrass\b/i, gmKey: "brass_section" },
   { pattern: /\bstrings\b/i, gmKey: "string_ensemble_1" },
+  { pattern: /\bpiano\b/i, gmKey: "acoustic_grand_piano" },
 ];
 
 export function resolveGakkiPresetUuidFromHints(args: {
@@ -300,8 +308,22 @@ export function resolveGakkiPresetUuidFromHints(args: {
   return undefined;
 }
 
+/**
+ * Extract the referenced entity ID from a nexus reference field.
+ * Reference fields are PrimitiveField<NexusLocation> where .value is
+ * a NexusLocation with an entityId property.
+ */
+export function refId(field: any): string | null {
+  if (!field) return null;
+  const val = field.value;
+  if (val && typeof val === "object" && typeof val.entityId === "string") return val.entityId;
+  if (typeof val === "string") return val;
+  return null;
+}
+
 /** Entity types that produce audio and their output field name. */
 export const AUDIO_OUTPUT_FIELD: Record<string, string> = {
+  audioDevice: "audioOutput",
   heisenberg: "audioOutput",
   bassline: "audioOutput",
   machiniste: "mainOutput",
@@ -497,6 +519,127 @@ export const STYLE_MAP: Record<string, { entityType: string; reason: string }> =
     reason: "Reverb-like spatial effects can be approximated with stompboxDelay.",
   },
 };
+
+// ─── ABC export helpers (inverse of parseAbcToNotes) ───────────────────────
+
+const ABC_PITCH_NAMES = ["C", "^C", "D", "^D", "E", "F", "^F", "G", "^G", "A", "^A", "B"];
+
+function gcd(a: number, b: number): number {
+  a = Math.abs(a);
+  b = Math.abs(b);
+  while (b) { [a, b] = [b, a % b]; }
+  return a;
+}
+
+/** Convert a MIDI pitch (0-127) to an ABC note name (e.g. 60 → "C", 72 → "c", 48 → "C,"). */
+export function midiPitchToAbc(pitch: number): string {
+  const pitchClass = ((pitch % 12) + 12) % 12;
+  const octave = Math.floor(pitch / 12) - 1;
+  const raw = ABC_PITCH_NAMES[pitchClass];
+  const acc = raw.startsWith("^") ? "^" : "";
+  const letter = acc ? raw.slice(1) : raw;
+
+  if (octave >= 5) {
+    return acc + letter.toLowerCase() + "'".repeat(octave - 5);
+  }
+  if (octave === 4) {
+    return acc + letter;
+  }
+  return acc + letter + ",".repeat(Math.max(0, 4 - octave));
+}
+
+/**
+ * Express `ticks` as an ABC duration suffix relative to `unitTicks` (the L: unit).
+ * e.g. with L:1/8 (unitTicks = 1920): 3840 ticks → "2", 960 → "/2", 1920 → "".
+ */
+export function ticksToAbcDuration(ticks: number, unitTicks: number): string {
+  if (ticks <= 0) return "";
+  const g = gcd(ticks, unitTicks);
+  const n = ticks / g;
+  const d = unitTicks / g;
+  if (d === 1) return n === 1 ? "" : String(n);
+  if (n === 1) return `/${d}`;
+  return `${n}/${d}`;
+}
+
+/**
+ * Convert an array of note events (same format as parseAbcToNotes output) back
+ * to a valid ABC notation string.  Simultaneous notes become chords, gaps become
+ * rests, and bar lines are inserted at measure boundaries.
+ */
+export function notesToAbc(
+  notes: ReadonlyArray<{ pitch: number; positionTicks: number; durationTicks: number; velocity: number }>,
+  config?: { tempoBpm?: number; timeSignatureNum?: number; timeSignatureDen?: number },
+): string {
+  const bpm = config?.tempoBpm ?? 120;
+  const tsNum = config?.timeSignatureNum ?? 4;
+  const tsDen = config?.timeSignatureDen ?? 4;
+  const unitTicks = TICKS_QUARTER / 2; // L:1/8 = 1920 ticks
+  const ticksPerBar = (TICKS_WHOLE * tsNum) / tsDen;
+
+  const header = [
+    "X:1",
+    "T:Exported Track",
+    `M:${tsNum}/${tsDen}`,
+    "L:1/8",
+    `Q:1/4=${Math.round(bpm)}`,
+    "K:C",
+  ].join("\n");
+
+  if (notes.length === 0) return header + "\n";
+
+  const sorted = [...notes].sort((a, b) => a.positionTicks - b.positionTicks);
+
+  // Group simultaneous notes into chords
+  const posMap = new Map<number, Array<{ pitch: number; durationTicks: number }>>();
+  for (const n of sorted) {
+    const entry = { pitch: n.pitch, durationTicks: n.durationTicks };
+    const arr = posMap.get(n.positionTicks);
+    if (arr) arr.push(entry);
+    else posMap.set(n.positionTicks, [entry]);
+  }
+  const positions = [...posMap.keys()].sort((a, b) => a - b);
+
+  const tokens: string[] = [];
+  let cursor = 0;
+
+  function emitRest(ticks: number): void {
+    let remaining = ticks;
+    while (remaining > 0) {
+      const nextBar = (Math.floor(cursor / ticksPerBar) + 1) * ticksPerBar;
+      const chunk = Math.min(remaining, nextBar - cursor);
+      tokens.push("z" + ticksToAbcDuration(chunk, unitTicks));
+      cursor += chunk;
+      remaining -= chunk;
+      if (remaining > 0 && cursor % ticksPerBar === 0) {
+        tokens.push("|");
+      }
+    }
+  }
+
+  for (const pos of positions) {
+    if (pos > cursor) emitRest(pos - cursor);
+
+    if (cursor > 0 && cursor % ticksPerBar === 0) {
+      const last = tokens[tokens.length - 1];
+      if (last !== "|") tokens.push("|");
+    }
+
+    const chord = posMap.get(pos)!;
+    const dur = Math.max(...chord.map((c) => c.durationTicks));
+    const durStr = ticksToAbcDuration(dur, unitTicks);
+
+    if (chord.length === 1) {
+      tokens.push(midiPitchToAbc(chord[0].pitch) + durStr);
+    } else {
+      tokens.push("[" + chord.map((c) => midiPitchToAbc(c.pitch)).join("") + "]" + durStr);
+    }
+    cursor = pos + dur;
+  }
+
+  tokens.push("|]");
+  return header + "\n" + tokens.join(" ") + "\n";
+}
 
 export function recommendEntityForStyle(description: string): {
   entityType: string;
