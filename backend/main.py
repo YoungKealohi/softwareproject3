@@ -37,6 +37,13 @@ def _get_mcp_server_path() -> str:
     return os.path.join(backend_dir, "..", "mcp-server", "dist", "server.js")
 
 
+def _get_cors_allow_origins() -> list[str]:
+    raw = os.getenv("CORS_ALLOW_ORIGINS", "")
+    if raw.strip():
+        return [origin.strip() for origin in raw.split(",") if origin.strip()]
+    return ["http://127.0.0.1:5173", "http://localhost:5173"]
+
+
 async def _ensure_client(request: AgentRequest) -> MCPClient:
     """Return a ready-to-use MCPClient, reusing it across requests.
 
@@ -123,7 +130,7 @@ app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://127.0.0.1:5173"],
+    allow_origins=_get_cors_allow_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

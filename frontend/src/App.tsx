@@ -7,7 +7,7 @@ import {
   type SyncedDocument,
 } from '@audiotool/nexus';
 import './App.css';
-import { runAgentStream, type AuthTokens, type ConversationMessage, type LLMProvider, type TraceItem, type DawContext } from './api';
+import { getApiBaseUrl, runAgentStream, type AuthTokens, type ConversationMessage, type LLMProvider, type TraceItem, type DawContext } from './api';
 import { importAudioBlobToProject } from './audiotool/importGeneratedAudio';
 
 type Role = 'user' | 'assistant';
@@ -690,7 +690,7 @@ export default function App() {
 
       let pendingMusic: { blob: Blob; prompt: string; durationMs: number } | null = null;
 
-      await runAgentStream('http://127.0.0.1:8000', {
+      await runAgentStream(getApiBaseUrl(), {
         prompt: trimmed,
         keywords: [],
         loop: 1,
@@ -741,7 +741,7 @@ export default function App() {
           try {
             const idx = audioImportLayoutRef.current++;
             await importAudioBlobToProject(client, syncedDocument, blob, {
-              displayName: `ElevenLabs: ${prompt.slice(0, 80)}`,
+              displayName: `ElevenLabs: ${String(prompt).slice(0, 80)}`,
               durationMs,
               layoutIndex: idx,
             });

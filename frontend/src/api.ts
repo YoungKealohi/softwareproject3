@@ -56,7 +56,26 @@ export type AgentResponse = {
   generated_music?: GeneratedMusicPayload | null;
 };
 
-const defaultBaseUrl = 'http://127.0.0.1:8000';
+const readEnv = (value: string | undefined) => (value && value.trim() ? value.trim() : undefined);
+
+const envBaseUrl = readEnv(import.meta.env.VITE_API_BASE_URL);
+
+const inferBaseUrlFromWindow = () => {
+  if (typeof window === 'undefined') {
+    return 'http://127.0.0.1:8000';
+  }
+
+  const host = window.location.hostname;
+  if (host === '127.0.0.1' || host === 'localhost') {
+    return 'http://127.0.0.1:8000';
+  }
+
+  return window.location.origin;
+};
+
+const defaultBaseUrl = envBaseUrl ?? inferBaseUrlFromWindow();
+
+export const getApiBaseUrl = () => defaultBaseUrl;
 
 export async function healthCheck(baseUrl = defaultBaseUrl): Promise<HealthStatus> {
   const res = await fetch(`${baseUrl}/health`);
