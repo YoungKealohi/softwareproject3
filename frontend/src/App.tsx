@@ -33,6 +33,7 @@ const createId = () =>
 const nowStamp = () => new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
 const readEnv = (value: string | undefined) => (value && value.trim() ? value : undefined);
+const tutorialSeenStorageKey = 'tutorial.seen';
 
 const envClientId = readEnv(import.meta.env.VITE_AUDIOTOOL_CLIENT_ID);
 const envRedirectUrl = readEnv(import.meta.env.VITE_AUDIOTOOL_REDIRECT_URL);
@@ -249,8 +250,11 @@ export default function App() {
     return 'filled';
   });
   const [tutorialStep, setTutorialStep] = useState(() => {
-    // Always show tutorial on refresh - don't check localStorage
-    return 1;
+    if (typeof window !== 'undefined') {
+      const seen = window.localStorage.getItem(tutorialSeenStorageKey) === 'true';
+      return seen ? 0 : 1;
+    }
+    return 0;
   });
   const [cogwheelPos, setCogwheelPos] = useState({ top: '50px', right: '20px' });
   const cogwheelRef = useRef<HTMLButtonElement>(null);
@@ -262,11 +266,18 @@ export default function App() {
     { title: 'Settings Menu', text: 'Open the Settings Menu to customize your experience and input your API keys.' }
   ];
 
+  const completeTutorial = () => {
+    setTutorialStep(0);
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(tutorialSeenStorageKey, 'true');
+    }
+  };
+
   const nextTutorialStep = () => {
     if (tutorialStep < tutorialSteps.length) {
       setTutorialStep(tutorialStep + 1);
     } else {
-      setTutorialStep(0);
+      completeTutorial();
     }
   };
 
@@ -277,7 +288,7 @@ export default function App() {
   };
 
   const skipTutorial = () => {
-    setTutorialStep(0);
+    completeTutorial();
   };
 
   useEffect(() => {
@@ -1156,7 +1167,7 @@ export default function App() {
                     value={dyslexiaFont}
                     onChange={(e) => setDyslexiaFont(e.target.value)}
                     className="theme-select"
-                    aria-label="Dyslexia-friendly font"
+                    aria-label="Dyslexia-friendly fonts"
                   >
                     <option value="default">Default</option>
                     <option value="atkinson">Atkinson Hyperlegible</option>
@@ -1282,13 +1293,7 @@ export default function App() {
                     type="password"
                     value={llmApiKey}
                     onChange={(e) => setLlmApiKey(e.target.value)}
-                    placeholder={
-                      llmProvider === 'gemini'
-                        ? 'Uses GEMINI_API_KEY if empty'
-                        : llmProvider === 'anthropic'
-                          ? 'Uses ANTHROPIC_API_KEY if empty'
-                          : 'Uses OPENAI_API_KEY if empty'
-                    }
+                    placeholder="Enter your LLM API key"
                     className="api-key-input"
                     aria-label="API key for LLM provider"
                     autoComplete="off"
@@ -1300,7 +1305,7 @@ export default function App() {
                     type="password"
                     value={elevenLabsApiKey}
                     onChange={(e) => setElevenLabsApiKey(e.target.value)}
-                    placeholder="For agent-generated music; uses ELEVENLABS_API_KEY if empty"
+                    placeholder="Enter your ElevenLabs API key"
                     className="api-key-input"
                     aria-label="ElevenLabs API key for music generation in chat"
                     autoComplete="off"
@@ -1336,10 +1341,10 @@ export default function App() {
             <p>{tutorialSteps[tutorialStep - 1].text}</p>
             <div style={{ display: 'flex', gap: '10px', justifyContent: 'center' }}>
               {tutorialStep > 1 && (
-                <button onClick={prevTutorialStep}>Go Back</button>
+                <button onClick={prevTutorialStep}>Back</button>
               )}
               {tutorialStep < tutorialSteps.length && (
-                <button onClick={skipTutorial}>Skip Tutorial</button>
+                <button onClick={skipTutorial}>Skip</button>
               )}
               <button onClick={nextTutorialStep}>
                 {tutorialStep === tutorialSteps.length ? 'Finish' : 'Next'}
