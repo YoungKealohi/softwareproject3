@@ -96,19 +96,48 @@ async def _ensure_client(request: AgentRequest) -> MCPClient:
     # For remote MCP, create a per-request client/session.
     # Reusing streamable_http sessions across request tasks can trigger cancel-scope errors.
     if _is_remote_mcp_target(server_target):
-        client = MCPClient(llm_provider=llm_provider, llm_api_key=llm_api_key)
-        await client.connect_to_server(server_target)
-        if request.authTokens and request.projectUrl:
-            await client.initialize_session(
-                access_token=request.authTokens.accessToken,
-                expires_at=request.authTokens.expiresAt,
-                client_id=request.authTokens.clientId,
-                redirect_url=request.authTokens.redirectUrl,
-                scope=request.authTokens.scope,
-                project_url=request.projectUrl,
-                refresh_token=request.authTokens.refreshToken,
-            )
-        return client
+        retries_raw = os.getenv("MCP_CONNECT_RETRIES", "3")
+        try:
+            retries = max(1, int(retries_raw))
+        except ValueError:
+            retries = 3
+
+        last_exc: Exception | None = None
+        for attempt in range(1, retries + 1):
+            client = MCPClient(llm_provider=llm_provider, llm_api_key=llm_api_key)
+            try:
+                await client.connect_to_server(server_target)
+                if request.authTokens and request.projectUrl:
+                    await client.initialize_session(
+                        access_token=request.authTokens.accessToken,
+                        expires_at=request.authTokens.expiresAt,
+                        client_id=request.authTokens.clientId,
+                        redirect_url=request.authTokens.redirectUrl,
+                        scope=request.authTokens.scope,
+                        project_url=request.projectUrl,
+                        refresh_token=request.authTokens.refreshToken,
+                    )
+                return client
+            except Exception as exc:
+                last_exc = exc
+                try:
+                    await asyncio.wait_for(client.cleanup(), timeout=5.0)
+                except Exception:
+                    logger.warning("Remote MCP client cleanup failed during retry")
+
+                if attempt < retries:
+                    backoff_s = min(2.0, 0.5 * attempt)
+                    logger.warning(
+                        "Remote MCP connect attempt %s/%s failed (%s); retrying in %.1fs",
+                        attempt,
+                        retries,
+                        exc,
+                        backoff_s,
+                    )
+                    await asyncio.sleep(backoff_s)
+
+        assert last_exc is not None
+        raise last_exc
 
     async with _client_lock:
         need_new = (
