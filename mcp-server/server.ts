@@ -4,7 +4,6 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import { createServer } from "node:http";
-import { randomUUID } from "node:crypto";
 import {
   getLoginStatus,
   createAudiotoolClient,
@@ -1837,8 +1836,8 @@ const useHttpTransport = (process.env.MCP_TRANSPORT || "").toLowerCase() === "ht
 
 if (useHttpTransport) {
   const transport = new StreamableHTTPServerTransport({
-    // Stateful mode aligns with Python streamable_http client behavior.
-    sessionIdGenerator: () => randomUUID(),
+    // Stateless mode avoids session-id mismatch issues across transport reconnects.
+    sessionIdGenerator: undefined,
   });
   await server.connect(transport);
 
