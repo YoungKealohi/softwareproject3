@@ -1847,6 +1847,8 @@ if (useHttpTransport) {
       const method = req.method || "GET";
       const requestUrl = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
       const pathname = requestUrl.pathname;
+      const startedAt = Date.now();
+      const requestId = `${startedAt}-${Math.random().toString(36).slice(2, 8)}`;
 
       if (method === "GET" && pathname === "/health") {
         res.statusCode = 200;
@@ -1866,6 +1868,68 @@ if (useHttpTransport) {
         res.end("Method not allowed");
         return;
       }
+
+      // Request-level diagnostics for MCP transport failures.
+      // We log response status + key session/request headers to diagnose transient 4xx/5xx.
+      let responseFinished = false;
+      const sessionHeader = String(req.headers["mcp-session-id"] || "");
+      const requestHeaderId = String(req.headers["x-request-id"] || "");
+      const lastEventId = String(req.headers["last-event-id"] || "");
+      const userAgent = String(req.headers["user-agent"] || "");
+      res.on("finish", () => {
+        responseFinished = true;
+        const durationMs = Date.now() - startedAt;
+        console.error(
+          "[mcp-http] request-complete",
+          JSON.stringify({
+            requestId,
+            method,
+            path: pathname,
+            statusCode: res.statusCode,
+            durationMs,
+            sessionHeader: sessionHeader || null,
+            requestHeaderId: requestHeaderId || null,
+            lastEventId: lastEventId || null,
+            userAgent: userAgent || null,
+          }),
+        );
+      });
+      req.on("aborted", () => {
+        const durationMs = Date.now() - startedAt;
+        console.error(
+          "[mcp-http] request-aborted",
+          JSON.stringify({
+            requestId,
+            method,
+            path: pathname,
+            durationMs,
+            sessionHeader: sessionHeader || null,
+            requestHeaderId: requestHeaderId || null,
+            lastEventId: lastEventId || null,
+            userAgent: userAgent || null,
+          }),
+        );
+      });
+      res.on("close", () => {
+        if (responseFinished) {
+          return;
+        }
+        const durationMs = Date.now() - startedAt;
+        console.error(
+          "[mcp-http] response-closed-before-finish",
+          JSON.stringify({
+            requestId,
+            method,
+            path: pathname,
+            statusCode: res.statusCode,
+            durationMs,
+            sessionHeader: sessionHeader || null,
+            requestHeaderId: requestHeaderId || null,
+            lastEventId: lastEventId || null,
+            userAgent: userAgent || null,
+          }),
+        );
+      });
 
       // Let the SDK parse MCP request payloads; pre-consuming request body can break initialization/session handshakes.
       await transport.handleRequest(req, res);
