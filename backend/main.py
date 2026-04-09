@@ -174,7 +174,7 @@ async def run_agent(request: AgentRequest):
         daw_context = request.dawContext.model_dump(exclude_none=True) or None
 
     async def event_generator():
-        queue = asyncio.Queue()
+        queue: asyncio.Queue = asyncio.Queue()
 
         async def stream_callback(event: dict):
             await queue.put(event)
@@ -183,8 +183,11 @@ async def run_agent(request: AgentRequest):
             try:
                 client = await _ensure_client(request)
                 client.set_elevenlabs_api_key(request.elevenlabsApiKey)
-                reply, raw_music = await run_agent_graph(
-                    client, request.prompt, history=history, daw_context=daw_context, stream_callback=stream_callback
+                reply, raw_music = await asyncio.wait_for(
+                    run_agent_graph(
+                        client, request.prompt, history=history, daw_context=daw_context, stream_callback=stream_callback
+                    ),
+                    timeout=300,
                 )
                 generated = (
                     GeneratedMusicAttachment(**raw_music).model_dump() if raw_music else None
@@ -197,15 +200,31 @@ async def run_agent(request: AgentRequest):
                 if not _persist_mcp_client() and not _uses_remote_mcp():
                     await _shutdown_client()
 
+        async def keepalive():
+            while True:
+                await asyncio.sleep(20)
+                await queue.put({"__keepalive__": True})
+
         task = asyncio.create_task(run_task())
+        keepalive_task = asyncio.create_task(keepalive())
 
-        while True:
-            event = await queue.get()
-            if event is None:
-                break
-            yield f"data: {json.dumps(event)}\n\n"
-
-        await task
+        try:
+            while True:
+                event = await queue.get()
+                if event is None:
+                    break
+                if event.get("__keepalive__"):
+                    yield ": keepalive\n\n"
+                    continue
+                try:
+                    yield f"data: {json.dumps(event)}\n\n"
+                except (TypeError, ValueError) as exc:
+                    logger.warning("Skipping non-serializable SSE event (%s): %s", exc, event)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            keepalive_task.cancel()
+            task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
