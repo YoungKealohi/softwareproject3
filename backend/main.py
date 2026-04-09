@@ -69,8 +69,12 @@ def _persist_mcp_client() -> bool:
     return os.getenv("MCP_CLIENT_PERSIST", "1").strip().lower() not in {"0", "false", "no"}
 
 
+def _is_remote_mcp_target(target: str) -> bool:
+    return target.startswith(("http://", "https://"))
+
+
 def _uses_remote_mcp() -> bool:
-    return _get_mcp_server_path().startswith(("http://", "https://"))
+    return _is_remote_mcp_target(_get_mcp_server_path())
 
 
 async def _ensure_client(request: AgentRequest) -> MCPClient:
@@ -86,6 +90,25 @@ async def _ensure_client(request: AgentRequest) -> MCPClient:
     project_url = request.projectUrl if (request.authTokens and request.projectUrl) else None
     llm_provider = request.llmProvider or "gemini"
     llm_api_key = request.llmApiKey if (request.llmApiKey and request.llmApiKey.strip()) else None
+
+    server_target = _get_mcp_server_path()
+
+    # For remote MCP, create a per-request client/session.
+    # Reusing streamable_http sessions across request tasks can trigger cancel-scope errors.
+    if _is_remote_mcp_target(server_target):
+        client = MCPClient(llm_provider=llm_provider, llm_api_key=llm_api_key)
+        await client.connect_to_server(server_target)
+        if request.authTokens and request.projectUrl:
+            await client.initialize_session(
+                access_token=request.authTokens.accessToken,
+                expires_at=request.authTokens.expiresAt,
+                client_id=request.authTokens.clientId,
+                redirect_url=request.authTokens.redirectUrl,
+                scope=request.authTokens.scope,
+                project_url=request.projectUrl,
+                refresh_token=request.authTokens.refreshToken,
+            )
+        return client
 
     async with _client_lock:
         need_new = (
@@ -110,7 +133,7 @@ async def _ensure_client(request: AgentRequest) -> MCPClient:
                 _client_llm_api_key = None
 
             client = MCPClient(llm_provider=llm_provider, llm_api_key=llm_api_key)
-            await client.connect_to_server(_get_mcp_server_path())
+            await client.connect_to_server(server_target)
             _client_llm_provider = llm_provider
             _client_llm_api_key = llm_api_key
 
@@ -203,6 +226,7 @@ async def run_agent(request: AgentRequest):
             await queue.put(event)
 
         async def run_task():
+            client: MCPClient | None = None
             try:
                 client = await _ensure_client(request)
                 client.set_elevenlabs_api_key(request.elevenlabsApiKey)
@@ -222,7 +246,12 @@ async def run_agent(request: AgentRequest):
                 await queue.put({"type": "error", "data": {"error": f"Agent error: {str(e)}"}})
             finally:
                 await queue.put(None)
-                if not _persist_mcp_client() and not _uses_remote_mcp():
+                if client is not None and _uses_remote_mcp():
+                    try:
+                        await asyncio.wait_for(client.cleanup(), timeout=5.0)
+                    except Exception:
+                        logger.warning("Remote MCP client cleanup failed; proceeding")
+                elif not _persist_mcp_client():
                     await _shutdown_client()
 
         async def keepalive():
