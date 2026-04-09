@@ -56,6 +56,10 @@ def _persist_mcp_client() -> bool:
     return os.getenv("MCP_CLIENT_PERSIST", "1").strip().lower() not in {"0", "false", "no"}
 
 
+def _uses_remote_mcp() -> bool:
+    return _get_mcp_server_path().startswith(("http://", "https://"))
+
+
 async def _ensure_client(request: AgentRequest) -> MCPClient:
     """Return a ready-to-use MCPClient, reusing it across requests.
 
@@ -207,7 +211,7 @@ async def run_agent(request: AgentRequest):
             yield f"data: {json.dumps(event)}\n\n"
 
         await task
-        if not _persist_mcp_client():
+        if not _persist_mcp_client() and not _uses_remote_mcp():
             await _shutdown_client()
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
