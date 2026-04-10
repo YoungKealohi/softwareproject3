@@ -68,6 +68,36 @@ let tokenManager: TokenManager | null = null;
 // auto-layout counter so entities placed without coordinates don't stack
 let autoLayoutOffset = 0;
 
+const MB = 1024 * 1024;
+
+function toMb(bytes: number): number {
+  return Math.round(bytes / MB);
+}
+
+function memoryDiagString(): string {
+  const mem = process.memoryUsage();
+  return [
+    `rss=${toMb(mem.rss)}MB`,
+    `heapUsed=${toMb(mem.heapUsed)}MB`,
+    `heapTotal=${toMb(mem.heapTotal)}MB`,
+    `external=${toMb(mem.external)}MB`,
+    `arrayBuffers=${toMb(mem.arrayBuffers)}MB`,
+    `uptime=${Math.round(process.uptime())}s`,
+  ].join(" ");
+}
+
+function logMemoryDiag(
+  label: string,
+  extra: Record<string, string | number | boolean | null | undefined> = {},
+): void {
+  const extras = Object.entries(extra)
+    .filter(([, value]) => value !== undefined)
+    .map(([key, value]) => `${key}=${value}`)
+    .join(" ");
+  const suffix = extras ? ` ${extras}` : "";
+  console.error(`[mcp-mem] ${label} ${memoryDiagString()}${suffix}`);
+}
+
 /**
  * Properly tear down the current session: stop the synced document (which
  * closes its WebSocket and lets Node GC the instance), then clear all
@@ -77,6 +107,11 @@ let autoLayoutOffset = 0;
  * away — not doing so leaks the sync process and WebSocket connection.
  */
 async function cleanupCurrentSession(): Promise<void> {
+  logMemoryDiag("cleanup-start", {
+    hasDocument: Boolean(document),
+    hasClient: Boolean(audiotoolClient),
+    hasTokenManager: Boolean(tokenManager),
+  });
   if (document) {
     try {
       const STOP_TIMEOUT_MS = 3000;
@@ -87,6 +122,7 @@ async function cleanupCurrentSession(): Promise<void> {
         ),
       ]);
       console.error("[cleanup] Previous document stopped");
+      logMemoryDiag("cleanup-after-stop");
     } catch (e) {
       console.error("[cleanup] Error stopping document:", e);
     }
@@ -95,6 +131,7 @@ async function cleanupCurrentSession(): Promise<void> {
   audiotoolClient = null;
   tokenManager = null;
   autoLayoutOffset = 0;
+  logMemoryDiag("cleanup-complete");
 }
 
 // helper for authenticated client
@@ -173,10 +210,12 @@ srv.registerTool(
   }) => {
     try {
       console.error("[initialize-session] Starting session initialization...");
+      logMemoryDiag("initialize-start");
 
       // Stop old document / client before creating new ones to avoid
       // leaking WebSocket connections and sync processes.
       await cleanupCurrentSession();
+      logMemoryDiag("initialize-after-precleanup");
 
       const {
         accessToken,
@@ -219,6 +258,7 @@ srv.registerTool(
         authorization: tokenManager,
       });
       console.error("[initialize-session] Client created successfully!");
+      logMemoryDiag("initialize-after-client");
 
       // Create and start synced document
       console.error(
@@ -229,12 +269,14 @@ srv.registerTool(
         project: projectUrl,
       });
       console.error("[initialize-session] Document created, starting sync...");
+      logMemoryDiag("initialize-after-document-created");
 
       // Start document sync
       await document.start();
       console.error(
         "[initialize-session] Document sync started, waiting for connection...",
       );
+      logMemoryDiag("initialize-after-document-start");
 
       // Wait for WebSocket connection to be established
       // The start() method syncs data but connection happens asynchronously
@@ -264,6 +306,7 @@ srv.registerTool(
 
       await waitForConnection;
       console.error("[initialize-session] Document connected and ready!");
+      logMemoryDiag("initialize-connected");
 
       return {
         content: [
@@ -1922,6 +1965,7 @@ if (useHttpTransport) {
   async function teardownActiveSession(): Promise<void> {
     if (!activeSession) return;
     console.error(`[session] Tearing down session ${activeSession.id}`);
+    logMemoryDiag("teardown-start", { session: activeSession.id });
     try {
       await cleanupCurrentSession();
       await activeSession.transport.close();
@@ -1929,6 +1973,7 @@ if (useHttpTransport) {
       console.error("[session] Error during teardown:", e);
     }
     activeSession = null;
+    logMemoryDiag("teardown-complete");
   }
 
   async function createNewSession(
@@ -1947,6 +1992,7 @@ if (useHttpTransport) {
 
     transport.onclose = () => {
       console.error("[session] Transport closed");
+      logMemoryDiag("transport-closed");
       if (activeSession?.transport !== transport) return;
       activeSession = null;
       void cleanupCurrentSession().catch((e) => {
@@ -2072,11 +2118,11 @@ if (useHttpTransport) {
         );
       });
 
-      // Diagnostic: log memory + uptime on every MCP request.
-      const mem = process.memoryUsage();
-      console.error(
-        `[mcp-diag] ${method} ${pathname} heap=${Math.round(mem.heapUsed / 1024 / 1024)}MB rss=${Math.round(mem.rss / 1024 / 1024)}MB uptime=${Math.round(process.uptime())}s session=${sessionHeader || "none"}`,
-      );
+      // Diagnostic: log memory breakdown on every MCP request.
+      logMemoryDiag(`${method} ${pathname}`, {
+        session: sessionHeader || "none",
+        requestId,
+      });
 
       // ---- Session routing ----
 

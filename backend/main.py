@@ -104,9 +104,10 @@ async def _ensure_client(request: AgentRequest) -> MCPClient:
 
     server_target = _get_mcp_server_path()
 
-    # For remote MCP, create a per-request client/session.
-    # Reusing streamable_http sessions across request tasks can trigger cancel-scope errors.
-    if _is_remote_mcp_target(server_target):
+    # For remote MCP, create a per-request client/session only when persistence
+    # is explicitly disabled. With persistence enabled, treat remote and local
+    # targets the same so we avoid re-initializing heavyweight MCP sessions.
+    if _is_remote_mcp_target(server_target) and not _persist_mcp_client():
         retries_raw = os.getenv("MCP_CONNECT_RETRIES", "3")
         try:
             retries = max(1, int(retries_raw))
@@ -311,6 +312,9 @@ async def run_agent(request: AgentRequest):
                             and not saw_successful_tool
                         )
                         if is_retryable:
+                            # Drop cached client before retry so the next attempt
+                            # performs a clean reconnect.
+                            await _shutdown_client()
                             logger.warning(
                                 "Retrying run after transient MCP error (%s/%s): %s",
                                 attempt,
@@ -320,7 +324,7 @@ async def run_agent(request: AgentRequest):
                             continue
                         raise
                     finally:
-                        if client is not None and _uses_remote_mcp():
+                        if client is not None and _uses_remote_mcp() and not _persist_mcp_client():
                             try:
                                 await asyncio.wait_for(client.cleanup(), timeout=5.0)
                             except Exception:
