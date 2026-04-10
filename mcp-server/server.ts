@@ -1947,9 +1947,11 @@ if (useHttpTransport) {
 
     transport.onclose = () => {
       console.error("[session] Transport closed");
-      if (activeSession?.transport === transport) {
-        activeSession = null;
-      }
+      if (activeSession?.transport !== transport) return;
+      activeSession = null;
+      void cleanupCurrentSession().catch((e) => {
+        console.error("[session] cleanup on close error:", e);
+      });
     };
 
     try {
@@ -2084,16 +2086,19 @@ if (useHttpTransport) {
         return;
       }
 
-      if (sessionHeader && activeSession && sessionHeader === activeSession.id) {
-        // Known session → route to its transport.
-        await activeSession.transport.handleRequest(req, res);
+      if (method === "DELETE" && sessionHeader && activeSession && sessionHeader === activeSession.id) {
+        // Client explicitly closing the session.
+        try {
+          await activeSession.transport.handleRequest(req, res);
+        } finally {
+          await teardownActiveSession();
+        }
         return;
       }
 
-      if (method === "DELETE" && sessionHeader && activeSession && sessionHeader === activeSession.id) {
-        // Client explicitly closing the session.
+      if (sessionHeader && activeSession && sessionHeader === activeSession.id) {
+        // Known session → route to its transport.
         await activeSession.transport.handleRequest(req, res);
-        await teardownActiveSession();
         return;
       }
 
