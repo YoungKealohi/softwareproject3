@@ -39,8 +39,8 @@ async def _cancel_current_run():
     if _current_run_task is not None and not _current_run_task.done():
         _current_run_task.cancel()
         try:
-            await _current_run_task
-        except (asyncio.CancelledError, Exception):
+            await asyncio.wait_for(_current_run_task, timeout=5.0)
+        except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
             pass
     _current_run_task = None
 
@@ -104,9 +104,10 @@ async def _ensure_client(request: AgentRequest) -> MCPClient:
 
     server_target = _get_mcp_server_path()
 
-    # For remote MCP, create a per-request client/session.
-    # Reusing streamable_http sessions across request tasks can trigger cancel-scope errors.
-    if _is_remote_mcp_target(server_target):
+    # For remote MCP, create a per-request client/session only when persistence
+    # is explicitly disabled. With persistence enabled, treat remote and local
+    # targets the same so we avoid re-initializing heavyweight MCP sessions.
+    if _is_remote_mcp_target(server_target) and not _persist_mcp_client():
         retries_raw = os.getenv("MCP_CONNECT_RETRIES", "3")
         try:
             retries = max(1, int(retries_raw))
@@ -311,6 +312,9 @@ async def run_agent(request: AgentRequest, http_request: Request):
                             and not saw_successful_tool
                         )
                         if is_retryable:
+                            # Drop cached client before retry so the next attempt
+                            # performs a clean reconnect.
+                            await _shutdown_client()
                             logger.warning(
                                 "Retrying run after transient MCP error (%s/%s): %s",
                                 attempt,
@@ -320,7 +324,7 @@ async def run_agent(request: AgentRequest, http_request: Request):
                             continue
                         raise
                     finally:
-                        if client is not None and _uses_remote_mcp():
+                        if client is not None and _uses_remote_mcp() and not _persist_mcp_client():
                             try:
                                 await asyncio.wait_for(client.cleanup(), timeout=5.0)
                             except Exception:
@@ -335,8 +339,11 @@ async def run_agent(request: AgentRequest, http_request: Request):
                 await queue.put(None)
 
         async def keepalive():
-            while True:
+            MAX_KEEPALIVE_DURATION = 330  # slightly longer than the 300s task timeout
+            elapsed = 0
+            while elapsed < MAX_KEEPALIVE_DURATION:
                 await asyncio.sleep(10)
+                elapsed += 10
                 await queue.put({"__keepalive__": True})
 
         async def watch_client_disconnect(
@@ -384,8 +391,10 @@ async def run_agent(request: AgentRequest, http_request: Request):
                     yield f"data: {json.dumps(event)}\n\n"
                 except (TypeError, ValueError) as exc:
                     logger.warning("Skipping non-serializable SSE event (%s): %s", exc, event)
-        except asyncio.CancelledError:
-            pass
+        except (asyncio.CancelledError, GeneratorExit, ConnectionError, BrokenPipeError):
+            logger.info("SSE client disconnected")
+        except Exception as exc:
+            logger.warning("Unexpected error in SSE generator: %s", exc)
         finally:
             disconnect_task.cancel()
             try:
@@ -396,8 +405,8 @@ async def run_agent(request: AgentRequest, http_request: Request):
             if not task.done():
                 task.cancel()
             try:
-                await task
-            except (asyncio.CancelledError, Exception):
+                await asyncio.wait_for(task, timeout=5.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
                 pass
             if _current_run_task is task:
                 _current_run_task = None

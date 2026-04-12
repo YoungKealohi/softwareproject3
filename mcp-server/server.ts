@@ -4,6 +4,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import { createServer } from "node:http";
+import { randomUUID } from "node:crypto";
 import {
   getLoginStatus,
   createAudiotoolClient,
@@ -33,11 +34,30 @@ import {
   refId,
 } from "./server-utils.js";
 
-// creating server instance
-const server = new McpServer({
-  name: "nexus-mcp-server",
-  version: "1.0.0",
-});
+// ---------------------------------------------------------------------------
+// Active session — at most one at a time.  Each session owns its own
+// McpServer + StreamableHTTPServerTransport so the SDK's one-transport-per-
+// server constraint is satisfied.
+// ---------------------------------------------------------------------------
+
+interface ActiveSession {
+  id: string;
+  server: McpServer;
+  transport: StreamableHTTPServerTransport;
+}
+
+let activeSession: ActiveSession | null = null;
+
+function createMcpServer(): McpServer {
+  return new McpServer({
+    name: "nexus-mcp-server",
+    version: "1.0.0",
+  });
+}
+
+// Placeholder: the single top-level `server` reference is only used for stdio
+// mode.  In HTTP mode, per-session servers are created via createMcpServer().
+let server: McpServer = createMcpServer();
 
 // client, document reference, and token manager
 let audiotoolClient: Awaited<ReturnType<typeof createAudiotoolClient>> | null =
@@ -48,6 +68,36 @@ let tokenManager: TokenManager | null = null;
 // auto-layout counter so entities placed without coordinates don't stack
 let autoLayoutOffset = 0;
 
+const MB = 1024 * 1024;
+
+function toMb(bytes: number): number {
+  return Math.round(bytes / MB);
+}
+
+function memoryDiagString(): string {
+  const mem = process.memoryUsage();
+  return [
+    `rss=${toMb(mem.rss)}MB`,
+    `heapUsed=${toMb(mem.heapUsed)}MB`,
+    `heapTotal=${toMb(mem.heapTotal)}MB`,
+    `external=${toMb(mem.external)}MB`,
+    `arrayBuffers=${toMb(mem.arrayBuffers)}MB`,
+    `uptime=${Math.round(process.uptime())}s`,
+  ].join(" ");
+}
+
+function logMemoryDiag(
+  label: string,
+  extra: Record<string, string | number | boolean | null | undefined> = {},
+): void {
+  const extras = Object.entries(extra)
+    .filter(([, value]) => value !== undefined)
+    .map(([key, value]) => `${key}=${value}`)
+    .join(" ");
+  const suffix = extras ? ` ${extras}` : "";
+  console.error(`[mcp-mem] ${label} ${memoryDiagString()}${suffix}`);
+}
+
 /**
  * Properly tear down the current session: stop the synced document (which
  * closes its WebSocket and lets Node GC the instance), then clear all
@@ -57,10 +107,22 @@ let autoLayoutOffset = 0;
  * away — not doing so leaks the sync process and WebSocket connection.
  */
 async function cleanupCurrentSession(): Promise<void> {
+  logMemoryDiag("cleanup-start", {
+    hasDocument: Boolean(document),
+    hasClient: Boolean(audiotoolClient),
+    hasTokenManager: Boolean(tokenManager),
+  });
   if (document) {
     try {
-      await document.stop();
+      const STOP_TIMEOUT_MS = 3000;
+      await Promise.race([
+        document.stop(),
+        new Promise<void>((_, reject) =>
+          setTimeout(() => reject(new Error("document.stop() timed out")), STOP_TIMEOUT_MS),
+        ),
+      ]);
       console.error("[cleanup] Previous document stopped");
+      logMemoryDiag("cleanup-after-stop");
     } catch (e) {
       console.error("[cleanup] Error stopping document:", e);
     }
@@ -69,6 +131,7 @@ async function cleanupCurrentSession(): Promise<void> {
   audiotoolClient = null;
   tokenManager = null;
   autoLayoutOffset = 0;
+  logMemoryDiag("cleanup-complete");
 }
 
 // helper for authenticated client
@@ -110,9 +173,16 @@ async function getDocument(): Promise<SyncedDocument> {
   return document;
 }
 
-// define tools
+// ---------------------------------------------------------------------------
+// Tool registration — called once per McpServer instance.  In HTTP mode a
+// fresh McpServer is created for every session, so this runs each time a new
+// client connects.  In stdio mode it runs once at startup.
+// ---------------------------------------------------------------------------
+
+function registerTools(srv: McpServer): void {
+
 // initialize session with auth tokens and project
-server.registerTool(
+srv.registerTool(
   "initialize-session",
   {
     description:
@@ -140,10 +210,12 @@ server.registerTool(
   }) => {
     try {
       console.error("[initialize-session] Starting session initialization...");
+      logMemoryDiag("initialize-start");
 
       // Stop old document / client before creating new ones to avoid
       // leaking WebSocket connections and sync processes.
       await cleanupCurrentSession();
+      logMemoryDiag("initialize-after-precleanup");
 
       const {
         accessToken,
@@ -186,6 +258,7 @@ server.registerTool(
         authorization: tokenManager,
       });
       console.error("[initialize-session] Client created successfully!");
+      logMemoryDiag("initialize-after-client");
 
       // Create and start synced document
       console.error(
@@ -196,12 +269,14 @@ server.registerTool(
         project: projectUrl,
       });
       console.error("[initialize-session] Document created, starting sync...");
+      logMemoryDiag("initialize-after-document-created");
 
       // Start document sync
       await document.start();
       console.error(
         "[initialize-session] Document sync started, waiting for connection...",
       );
+      logMemoryDiag("initialize-after-document-start");
 
       // Wait for WebSocket connection to be established
       // The start() method syncs data but connection happens asynchronously
@@ -231,6 +306,7 @@ server.registerTool(
 
       await waitForConnection;
       console.error("[initialize-session] Document connected and ready!");
+      logMemoryDiag("initialize-connected");
 
       return {
         content: [
@@ -258,7 +334,7 @@ server.registerTool(
 );
 
 // open document tool (kept for backward compatibility)
-server.registerTool(
+srv.registerTool(
   "open-document",
   {
     description: "Open an Audiotool document via project URL or ID.",
@@ -315,7 +391,7 @@ server.registerTool(
   },
 );
 // add entity tool (supports single or batch via optional `entities` array)
-server.registerTool(
+srv.registerTool(
   "add-entity",
   {
     description: [
@@ -502,7 +578,7 @@ server.registerTool(
 );
 
 // add-abc-track tool (supports single or batch via optional `tracks` array)
-server.registerTool(
+srv.registerTool(
   "add-abc-track",
   {
     description: [
@@ -775,7 +851,7 @@ server.registerTool(
 );
 
 // remove entity tool (supports single or batch via optional `entityIDs` array)
-server.registerTool(
+srv.registerTool(
   "remove-entity",
   {
     description: [
@@ -847,7 +923,7 @@ server.registerTool(
   },
 );
 // update entity values tool (supports single-entity or multi-entity via optional `entities` array)
-server.registerTool(
+srv.registerTool(
   "update-entity-values",
   {
     description: [
@@ -942,7 +1018,7 @@ server.registerTool(
 );
 
 // update entity position tool (supports single or multi-entity via optional `updates` array)
-server.registerTool(
+srv.registerTool(
   "update-entity-position",
   {
     description: [
@@ -1025,7 +1101,7 @@ server.registerTool(
 );
 
 // inspect entity tool (supports single or batch via optional `entityIDs` array)
-server.registerTool(
+srv.registerTool(
   "inspect-entity",
   {
     description: [
@@ -1100,7 +1176,7 @@ server.registerTool(
 );
 
 // connect entities tool (supports single or batch via optional `connections` array)
-server.registerTool(
+srv.registerTool(
   "connect-entities",
   {
     description: [
@@ -1237,7 +1313,7 @@ server.registerTool(
 );
 
 // disconnect entities tool (supports single or batch via optional `cableIds` array)
-server.registerTool(
+srv.registerTool(
   "disconnect-entities",
   {
     description: [
@@ -1297,7 +1373,7 @@ server.registerTool(
 );
 
 // list entities tool
-server.registerTool(
+srv.registerTool(
   "list-entities",
   {
     description: [
@@ -1354,7 +1430,7 @@ server.registerTool(
 );
 
 // ─── update-project-config tool ─────────────────────────────────────────────
-server.registerTool(
+srv.registerTool(
   "update-project-config",
   {
     description: [
@@ -1486,7 +1562,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+srv.registerTool(
   "get-project-summary",
   {
     description: [
@@ -1601,7 +1677,7 @@ server.registerTool(
 );
 
 // ─── export-tracks-abc tool ───────────────────────────────────────────────
-server.registerTool(
+srv.registerTool(
   "export-tracks-abc",
   {
     description: [
@@ -1756,7 +1832,7 @@ server.registerTool(
 );
 
 // recommend-entity-for-style tool
-server.registerTool(
+srv.registerTool(
   "recommend-entity-for-style",
   {
     description: [
@@ -1789,16 +1865,23 @@ server.registerTool(
   },
 );
 
+} // end registerTools
+
+// Register tools on the default server instance (used by stdio mode).
+registerTools(server);
+
 // ---------------------------------------------------------------------------
 // Global error handlers — prevent silent crashes from the nexus SDK or
 // unhandled promise rejections.
 // ---------------------------------------------------------------------------
 process.on("uncaughtException", (err) => {
   console.error("[FATAL] Uncaught exception:", err);
+  process.exit(1);
 });
 
 process.on("unhandledRejection", (reason) => {
   console.error("[FATAL] Unhandled rejection:", reason);
+  process.exit(1);
 });
 
 process.on("warning", (warning) => {
@@ -1813,36 +1896,143 @@ process.on("exit", (code) => {
   console.error(`[shutdown] exit with code=${code}`);
 });
 
-process.on("SIGTERM", async () => {
-  console.error("[shutdown] SIGTERM received, cleaning up...");
-  await cleanupCurrentSession();
-  process.exit(0);
-});
+// ---------------------------------------------------------------------------
+// Graceful shutdown — single handler for all termination signals with a hard
+// timeout so the process always exits even if cleanup hangs.
+// ---------------------------------------------------------------------------
 
-process.on("SIGINT", async () => {
-  console.error("[shutdown] SIGINT received, cleaning up...");
-  await cleanupCurrentSession();
-  process.exit(0);
-});
+let _httpServer: ReturnType<typeof createServer> | null = null;
+let _isShuttingDown = false;
 
-process.on("SIGHUP", async () => {
-  console.error("[shutdown] SIGHUP received, cleaning up...");
-  await cleanupCurrentSession();
+async function gracefulShutdown(signal: string): Promise<void> {
+  if (_isShuttingDown) return;
+  _isShuttingDown = true;
+  console.error(`[shutdown] ${signal} received, cleaning up...`);
+
+  const SHUTDOWN_TIMEOUT_MS = 5000;
+
+  const cleanup = async () => {
+    try {
+      await cleanupCurrentSession();
+    } catch (e) {
+      console.error("[shutdown] cleanupCurrentSession error:", e);
+    }
+    if (activeSession) {
+      try {
+        await activeSession.transport.close();
+      } catch (e) {
+        console.error("[shutdown] transport.close() error:", e);
+      }
+      activeSession = null;
+    }
+    if (_httpServer) {
+      _httpServer.close();
+    }
+  };
+
+  const timeout = new Promise<void>((resolve) => {
+    setTimeout(() => {
+      console.error("[shutdown] Cleanup timed out, forcing exit");
+      resolve();
+    }, SHUTDOWN_TIMEOUT_MS);
+  });
+
+  await Promise.race([cleanup(), timeout]);
   process.exit(0);
-});
+}
+
+for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"] as const) {
+  process.on(sig, () => {
+    gracefulShutdown(sig);
+  });
+}
 
 // Start the server
 const useHttpTransport = (process.env.MCP_TRANSPORT || "").toLowerCase() === "http";
 
 if (useHttpTransport) {
-  const transport = new StreamableHTTPServerTransport({
-    // Stateless mode avoids session-id mismatch issues across transport reconnects.
-    sessionIdGenerator: undefined,
-  });
-  await server.connect(transport);
+  // -----------------------------------------------------------------------
+  // Stateful HTTP mode — one McpServer + transport per session.
+  //
+  // The SDK enforces one transport per McpServer.  To support client
+  // reconnects we create a fresh McpServer + transport whenever a POST
+  // arrives without a session ID (= new client initialising).  Subsequent
+  // requests carrying the mcp-session-id header are routed to the existing
+  // transport.  Since only one Python backend connects at a time, we keep
+  // at most one active session and tear down the old one on reconnect.
+  // -----------------------------------------------------------------------
+
+  async function teardownActiveSession(): Promise<void> {
+    if (!activeSession) return;
+    console.error(`[session] Tearing down session ${activeSession.id}`);
+    logMemoryDiag("teardown-start", { session: activeSession.id });
+    try {
+      await cleanupCurrentSession();
+      await activeSession.transport.close();
+    } catch (e) {
+      console.error("[session] Error during teardown:", e);
+    }
+    activeSession = null;
+    logMemoryDiag("teardown-complete");
+  }
+
+  async function createNewSession(
+    req: import("node:http").IncomingMessage,
+    res: import("node:http").ServerResponse,
+  ): Promise<void> {
+    // Tear down any prior session first.
+    await teardownActiveSession();
+
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: () => randomUUID(),
+    });
+
+    const perRequestServer = createMcpServer();
+    registerTools(perRequestServer);
+
+    transport.onclose = () => {
+      console.error("[session] Transport closed");
+      logMemoryDiag("transport-closed");
+      if (activeSession?.transport !== transport) return;
+      activeSession = null;
+      void cleanupCurrentSession().catch((e) => {
+        console.error("[session] cleanup on close error:", e);
+      });
+    };
+
+    try {
+      await perRequestServer.connect(transport);
+    } catch (err) {
+      console.error("[mcp-http] Failed to connect transport:", err);
+      if (!res.headersSent) {
+        res.statusCode = 500;
+        res.setHeader("content-type", "application/json");
+        res.end(JSON.stringify({ error: "Failed to initialize session" }));
+      }
+      return;
+    }
+
+    // The transport assigns the session ID during the initialize handshake.
+    // We grab it after handleRequest completes.  However, the SDK exposes
+    // `sessionId` on the transport only after the initialize response is
+    // sent, so we also listen for the response to extract it.
+    await transport.handleRequest(req, res);
+
+    // After the initialize handshake the transport has a sessionId.
+    const sid = (transport as unknown as { sessionId?: string }).sessionId;
+    if (sid) {
+      activeSession = { id: sid, server: perRequestServer, transport };
+      console.error(`[session] New session created: ${sid}`);
+    } else {
+      // If no session ID was assigned this was probably not an initialize
+      // request.  Store the session anyway — the transport will reject
+      // non-matching requests on its own.
+      console.error("[session] Transport connected but no session ID assigned");
+    }
+  }
 
   const port = Number(process.env.PORT || 3001);
-  const httpServer = createServer(async (req, res) => {
+  _httpServer = createServer(async (req, res) => {
     try {
       const method = req.method || "GET";
       const requestUrl = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
@@ -1869,8 +2059,7 @@ if (useHttpTransport) {
         return;
       }
 
-      // Request-level diagnostics for MCP transport failures.
-      // We log response status + key session/request headers to diagnose transient 4xx/5xx.
+      // Request-level diagnostics.
       let responseFinished = false;
       const sessionHeader = String(req.headers["mcp-session-id"] || "");
       const requestHeaderId = String(req.headers["x-request-id"] || "");
@@ -1911,9 +2100,7 @@ if (useHttpTransport) {
         );
       });
       res.on("close", () => {
-        if (responseFinished) {
-          return;
-        }
+        if (responseFinished) return;
         const durationMs = Date.now() - startedAt;
         console.error(
           "[mcp-http] response-closed-before-finish",
@@ -1931,10 +2118,50 @@ if (useHttpTransport) {
         );
       });
 
-      // Let the SDK parse MCP request payloads; pre-consuming request body can break initialization/session handshakes.
-      await transport.handleRequest(req, res);
+      // Diagnostic: log memory breakdown on every MCP request.
+      logMemoryDiag(`${method} ${pathname}`, {
+        session: sessionHeader || "none",
+        requestId,
+      });
+
+      // ---- Session routing ----
+
+      if (method === "POST" && !sessionHeader) {
+        // No session ID → new client initialising.
+        await createNewSession(req, res);
+        return;
+      }
+
+      if (method === "DELETE" && sessionHeader && activeSession && sessionHeader === activeSession.id) {
+        // Client explicitly closing the session.
+        try {
+          await activeSession.transport.handleRequest(req, res);
+        } finally {
+          await teardownActiveSession();
+        }
+        return;
+      }
+
+      if (sessionHeader && activeSession && sessionHeader === activeSession.id) {
+        // Known session → route to its transport.
+        await activeSession.transport.handleRequest(req, res);
+        return;
+      }
+
+      // Unknown or stale session ID → 404 per MCP spec.
+      // The Python client should discard the session and reinitialize.
+      console.error(`[session] Unknown session ID: ${sessionHeader} (active: ${activeSession?.id ?? "none"})`);
+      res.statusCode = 404;
+      res.setHeader("content-type", "application/json");
+      res.end(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          error: { code: -32000, message: "Session not found. Please reinitialize." },
+          id: null,
+        }),
+      );
     } catch (err) {
-      console.error("[mcp-http] Request error:", err);
+      console.error("[mcp-http] Request error:", err instanceof Error ? err.stack : err);
       if (!res.headersSent) {
         res.statusCode = 500;
         res.setHeader("content-type", "application/json");
@@ -1943,7 +2170,12 @@ if (useHttpTransport) {
     }
   });
 
-  httpServer.listen(port, () => {
+  _httpServer.on("error", (err) => {
+    console.error("[mcp-http] Server error:", err);
+    process.exit(1);
+  });
+
+  _httpServer.listen(port, () => {
     console.error(`[mcp-http] Listening on port ${port} at /mcp`);
   });
 } else {
