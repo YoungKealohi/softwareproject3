@@ -319,6 +319,9 @@ srv.registerTool(
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
       console.error("[initialize-session] ERROR:", errorMsg);
+      logMemoryDiag("initialize-error-before-cleanup");
+      await cleanupCurrentSession();
+      logMemoryDiag("initialize-error-after-cleanup");
       // Return error as tool result instead of throwing so the server stays alive
       return {
         content: [
@@ -1974,6 +1977,10 @@ if (useHttpTransport) {
     }
     activeSession = null;
     logMemoryDiag("teardown-complete");
+    if (process.env.MCP_GC_AFTER_TEARDOWN === "1" && typeof global.gc === "function") {
+      global.gc();
+      logMemoryDiag("teardown-post-gc");
+    }
   }
 
   async function createNewSession(
@@ -2000,10 +2007,19 @@ if (useHttpTransport) {
       });
     };
 
+    const disposeTransport = async (reason: string) => {
+      try {
+        await transport.close();
+      } catch (e) {
+        console.error(`[session] transport.close() after ${reason}:`, e);
+      }
+    };
+
     try {
       await perRequestServer.connect(transport);
     } catch (err) {
       console.error("[mcp-http] Failed to connect transport:", err);
+      await disposeTransport("connect-failed");
       if (!res.headersSent) {
         res.statusCode = 500;
         res.setHeader("content-type", "application/json");
@@ -2016,7 +2032,18 @@ if (useHttpTransport) {
     // We grab it after handleRequest completes.  However, the SDK exposes
     // `sessionId` on the transport only after the initialize response is
     // sent, so we also listen for the response to extract it.
-    await transport.handleRequest(req, res);
+    try {
+      await transport.handleRequest(req, res);
+    } catch (err) {
+      console.error("[mcp-http] MCP handleRequest failed:", err);
+      await disposeTransport("handleRequest-failed");
+      if (!res.headersSent) {
+        res.statusCode = 500;
+        res.setHeader("content-type", "application/json");
+        res.end(JSON.stringify({ error: "Failed to handle MCP request" }));
+      }
+      return;
+    }
 
     // After the initialize handshake the transport has a sessionId.
     const sid = (transport as unknown as { sessionId?: string }).sessionId;
@@ -2024,10 +2051,12 @@ if (useHttpTransport) {
       activeSession = { id: sid, server: perRequestServer, transport };
       console.error(`[session] New session created: ${sid}`);
     } else {
-      // If no session ID was assigned this was probably not an initialize
-      // request.  Store the session anyway — the transport will reject
-      // non-matching requests on its own.
-      console.error("[session] Transport connected but no session ID assigned");
+      // Without a session id we cannot route further requests here; leaving
+      // the transport open leaks an McpServer + handlers on every reconnect.
+      console.error(
+        "[session] No session ID after handshake — closing transport to avoid leaking memory",
+      );
+      await disposeTransport("no-session-id");
     }
   }
 
