@@ -222,11 +222,27 @@ async def test_execute_generate_music_coerces_and_formats_errors():
             }
         )
         assert "Success" in text
+        assert "Instrumental-only" in text
+        assert "Nexus web app" in text
         assert attach["audio_base64"] == "Ym9n"
-        mock_gm.assert_called_once()
+        assert mock_gm.call_count == 1
         assert mock_gm.call_args.kwargs["prompt"] == "lo fi"
         assert mock_gm.call_args.kwargs["music_length_ms"] == 8000
         assert mock_gm.call_args.kwargs["force_instrumental"] is True
+
+        mock_gm.return_value = ("Ym9n", "mp3_44100_128", "echo", 5000)
+        text_v, _ = await client._execute_generate_music(
+            {"prompt": "sing these lyrics", "force_instrumental": False}
+        )
+        assert "Success" in text_v
+        assert "Instrumental-only" not in text_v
+        assert mock_gm.call_count == 2
+        mock_gm.assert_called_with(
+            prompt="sing these lyrics",
+            music_length_ms=15000,
+            force_instrumental=False,
+            api_key=None,
+        )
 
     with patch(
         "agents.mcp_client_new.generate_music_base64",

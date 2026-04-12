@@ -42,7 +42,10 @@ GENERATE_MUSIC_SCHEMA: Dict[str, Any] = {
         },
         "force_instrumental": {
             "type": "boolean",
-            "description": "If true (default), no vocals.",
+            "description": (
+                "If true (default), output is instrumental only—user lyrics are not sung. "
+                "Set to false when the user wants vocals or specific lyrics performed in the audio."
+            ),
         },
     },
     "required": ["prompt"],
@@ -95,7 +98,11 @@ def load_system_instruction() -> str:
         "When the user wants AI-generated audio from a text description (e.g. 'make a 15s lo-fi beat'), "
         f"call the `{GENERATE_MUSIC_TOOL_NAME}` tool with their prompt. Do not use this for ABC notation "
         "(use add-abc-track instead). Describe style and mood; if generation fails, retry with a generic "
-        "style description and avoid naming specific tunes or copyrighted titles.\n\n"
+        "style description and avoid naming specific tunes or copyrighted titles. "
+        "If they want sung vocals or specific lyrics in the generated audio, pass force_instrumental=false "
+        "(default true means instrumental only). "
+        "Timeline placement is done by the Nexus web app when an Audiotool project is connected in the sidebar; "
+        "do not tell the user the clip is already on their Audiotool timeline unless they have that connection.\n\n"
         "MASTERING SAFETY:\n"
         "Before rewiring for mastering, call get-project-summary and identify all currently audible sources. "
         "This includes note-track players AND audio-track players (for example audioDevice entities created by imported samples). "
@@ -234,12 +241,20 @@ class MCPClient:
                 None,
             )
 
+        inst_note = (
+            " Instrumental-only (force_instrumental true): lyrics in the prompt are not sung; "
+            "use force_instrumental false if the user wanted vocals."
+            if instrumental
+            else ""
+        )
         summary = (
             f"Success: generated about {length // 1000}s of "
-            f"{'instrumental ' if instrumental else ''}audio ({fmt}). "
-            "The sample has been automatically added to the project timeline. "
-            "The user can play it below or in the DAW. "
-            "Do not tell the user to import it — it is already imported."
+            f"{'instrumental ' if instrumental else ''}audio ({fmt}).{inst_note} "
+            "The Nexus web app receives the audio and shows a preview player. "
+            "The clip is added to the Audiotool project timeline only when this Nexus session has a "
+            "connected Audiotool project (sidebar); otherwise the user must connect a project first or import manually. "
+            "Tell the user to check the preview and the sidebar connection status—do not claim the clip is already "
+            "on their Audiotool timeline unless you know their project was connected here."
         )
         return summary, {
             "audio_base64": b64,
@@ -380,7 +395,9 @@ class MCPClient:
                 description=(
                     "Generate original music audio from a text prompt using ElevenLabs. "
                     "Use when the user asks for AI-generated music, beds, beats, or jingles—not for ABC notation "
-                    "(use add-abc-track for ABC)."
+                    "(use add-abc-track for ABC). "
+                    "Use force_instrumental=false for sung vocals or user-specified lyrics. "
+                    "Nexus adds the clip to the Audiotool timeline only when a project is connected in the sidebar."
                 ),
                 parameters=gm_music_schema,
             )
@@ -414,7 +431,8 @@ class MCPClient:
             "name": GENERATE_MUSIC_TOOL_NAME,
             "description": (
                 "Generate original music audio from a text prompt (ElevenLabs). "
-                "For AI-generated music requests—not ABC notation (add-abc-track)."
+                "For AI-generated music requests—not ABC notation (add-abc-track). "
+                "force_instrumental=false for vocals/lyrics; timeline import requires a connected Audiotool project in Nexus."
             ),
             "input_schema": convert_mcp_schema_to_anthropic(GENERATE_MUSIC_SCHEMA),
         })
@@ -451,7 +469,8 @@ class MCPClient:
                 "name": GENERATE_MUSIC_TOOL_NAME,
                 "description": (
                     "Generate original music audio from a text prompt (ElevenLabs). "
-                    "Not for ABC notation."
+                    "Not for ABC notation. force_instrumental=false for vocals/lyrics; "
+                    "timeline import needs a connected Audiotool project in Nexus."
                 ),
                 "parameters": convert_mcp_schema_to_openai(GENERATE_MUSIC_SCHEMA),
             },
