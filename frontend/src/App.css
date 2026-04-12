@@ -1506,6 +1506,35 @@ label {
     position: absolute;
 }
 
+.tutorial-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+}
+
+.tutorial-header h2 {
+    margin: 0;
+    flex: 1;
+    text-align: center;
+}
+
+.tutorial-step-indicator,
+.tutorial-step-spacer {
+    font-size: 0.75rem;
+    min-width: 40px;
+    white-space: nowrap;
+}
+
+.tutorial-step-indicator {
+    color: var(--muted);
+    text-align: right;
+}
+
+.tutorial-step-spacer {
+    visibility: hidden;
+}
+
 .tutorial-modal.arrow-left::before {
     content: '';
     position: absolute;
@@ -1585,7 +1614,6 @@ label {
 
 .tutorial-modal h2 {
     font-family: 'Fraunces', serif;
-    margin-bottom: 10px;
 }
 
 .tutorial-modal p {

@@ -1207,7 +1207,7 @@ export default function App() {
                   />
                 </div>
                 <div className="setting-item">
-                  <span className="setting-label">Dyslexia-Fonts</span>
+                  <span className="setting-label">Fonts</span>
                   <select
                     value={dyslexiaFont}
                     onChange={(e) => setDyslexiaFont(e.target.value)}
@@ -1382,7 +1382,11 @@ export default function App() {
                   tutorialStep === 3 ? { right: cogwheelPos.right, top: cogwheelPos.top } : {})
             }}
           >
-            <h2>{tutorialSteps[tutorialStep - 1].title}</h2>
+            <div className="tutorial-header">
+              <span className="tutorial-step-spacer"></span>
+              <h2>{tutorialSteps[tutorialStep - 1].title}</h2>
+              <span className="tutorial-step-indicator">{tutorialStep} of {tutorialSteps.length}</span>
+            </div>
             <p>{tutorialSteps[tutorialStep - 1].text}</p>
             <div style={{ display: 'flex', gap: '10px', justifyContent: 'center' }}>
               {tutorialStep > 1 && (
