@@ -34,7 +34,6 @@ _client_llm_provider: str = "gemini"
 _client_llm_api_key: str | None = None
 _client_lock = asyncio.Lock()
 _current_run_task: asyncio.Task | None = None
-_background_cleanup_tasks: set[asyncio.Task] = set()
 _last_agent_completed_monotonic: float | None = None
 _mcp_idle_task: asyncio.Task | None = None
 
@@ -46,48 +45,25 @@ def _format_exception_detail(exc: BaseException) -> str:
     return type(exc).__name__
 
 
-def _track_background_cleanup_task(task: asyncio.Task, label: str) -> None:
-    _background_cleanup_tasks.add(task)
-
-    def _on_done(done: asyncio.Task) -> None:
-        _background_cleanup_tasks.discard(done)
-        try:
-            done.result()
-        except asyncio.CancelledError:
-            logger.warning("%s cleanup task was cancelled", label)
-        except Exception as exc:
-            logger.warning("%s cleanup task failed in background: %s", label, _format_exception_detail(exc))
-
-    task.add_done_callback(_on_done)
-
-
 async def _cleanup_client_with_timeout(
     client: MCPClient,
     label: str,
     timeout_seconds: float = MCP_CLIENT_CLEANUP_TIMEOUT_SECONDS,
 ) -> None:
-    """Try cleanup with timeout without cancelling the cleanup coroutine."""
-    cleanup_task = asyncio.create_task(client.cleanup())
+    """Attempt client cleanup with a timeout in the current task."""
     try:
-        await asyncio.wait_for(asyncio.shield(cleanup_task), timeout=timeout_seconds)
-    except asyncio.TimeoutError:
+        async with asyncio.timeout(timeout_seconds):
+            await client.cleanup()
+    except TimeoutError:
         logger.warning(
-            "%s cleanup exceeded %.1fs; continuing while cleanup finishes in background",
+            "%s cleanup exceeded %.1fs; continuing",
             label,
             timeout_seconds,
         )
-        _track_background_cleanup_task(cleanup_task, label)
     except asyncio.CancelledError:
-        _track_background_cleanup_task(cleanup_task, label)
         raise
     except Exception as exc:
         logger.warning("%s cleanup failed: %s", label, _format_exception_detail(exc))
-    else:
-        if cleanup_task.done():
-            try:
-                cleanup_task.result()
-            except Exception as exc:
-                logger.warning("%s cleanup failed: %s", label, _format_exception_detail(exc))
 
 
 def _mcp_idle_teardown_seconds() -> float:
@@ -176,7 +152,16 @@ def _get_frontend_dist_dir() -> Path:
 
 
 def _persist_mcp_client() -> bool:
-    return os.getenv("MCP_CLIENT_PERSIST", "1").strip().lower() not in {"0", "false", "no"}
+    persist_enabled = os.getenv("MCP_CLIENT_PERSIST", "1").strip().lower() not in {"0", "false", "no"}
+    if not persist_enabled:
+        return False
+
+    # Remote streamable-http sessions are task-affine; make persistence opt-in
+    # for remote MCP targets.
+    if _uses_remote_mcp():
+        return os.getenv("MCP_REMOTE_CLIENT_PERSIST", "0").strip().lower() in {"1", "true", "yes"}
+
+    return True
 
 
 def _is_remote_mcp_target(target: str) -> bool:
@@ -320,7 +305,7 @@ async def _shutdown_client():
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     global _mcp_idle_task
-    if _mcp_idle_teardown_seconds() > 0:
+    if _mcp_idle_teardown_seconds() > 0 and _persist_mcp_client():
         _mcp_idle_task = asyncio.create_task(_mcp_idle_watcher(), name="mcp-idle-watcher")
     try:
         yield
