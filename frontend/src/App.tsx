@@ -76,8 +76,8 @@ const getStudioUrl = (projectName: string) =>
   `https://beta.audiotool.com/studio?project=${extractProjectId(projectName)}`;
 
 /**
- * Accepts an Audiotool studio URL (?project=…), a resource id (`projects/x`), or a bare project id.
- * Returns the API resource name and the studio URL used for sync.
+ * Accepts only an Audiotool studio URL that includes ?project=...
+ * Returns the API resource name and the normalized studio URL used for sync.
  */
 function parseAudiotoolProjectRef(raw: string): { resourceName: string; studioUrl: string } | null {
   const t = raw.trim();
@@ -85,40 +85,21 @@ function parseAudiotoolProjectRef(raw: string): { resourceName: string; studioUr
     return null;
   }
 
-  const projectsPrefix = t.match(/^projects\/([^/?#]+)\/?$/i);
-  if (projectsPrefix) {
-    const id = projectsPrefix[1].trim();
-    if (!id) {
+  try {
+    const u = new URL(t);
+    const projectId = u.searchParams.get('project')?.trim();
+    if (!projectId) {
       return null;
     }
-    const resourceName = `projects/${id}`;
-    return { resourceName, studioUrl: getStudioUrl(resourceName) };
-  }
-
-  let asUrl = t;
-  if (!/^https?:\/\//i.test(asUrl) && /[./]/.test(asUrl)) {
-    asUrl = `https://${asUrl}`;
-  }
-  if (/^https?:\/\//i.test(asUrl)) {
-    try {
-      const u = new URL(asUrl);
-      const q = u.searchParams.get('project');
-      if (q?.trim()) {
-        const id = q.trim();
-        const resourceName = `projects/${id}`;
-        return { resourceName, studioUrl: getStudioUrl(resourceName) };
-      }
-    } catch {
-      /* not a valid URL */
+    const host = u.hostname.toLowerCase();
+    if (!host.endsWith('audiotool.com')) {
+      return null;
     }
-  }
-
-  if (!t.includes('/') && !t.includes(' ') && !t.includes('?') && !t.includes('#')) {
-    const resourceName = `projects/${t}`;
+    const resourceName = `projects/${projectId}`;
     return { resourceName, studioUrl: getStudioUrl(resourceName) };
+  } catch {
+    return null;
   }
-
-  return null;
 }
 
 const extractAuthTokens = (clientId: string, redirectUrl: string, scope: string): AuthTokens | null => {
@@ -678,7 +659,7 @@ export default function App() {
     const parsed = parseAudiotoolProjectRef(projectUrl);
     if (!parsed) {
       setProjectError(
-        'Enter a valid Audiotool studio link (with ?project=…), a projects/… id, or a bare project id.',
+        'Enter a valid Audiotool project URL with ?project=... (for example: https://beta.audiotool.com/studio?project=...).',
       );
       return;
     }
@@ -931,6 +912,10 @@ export default function App() {
         || extractProjectId(p.name).toLowerCase().includes(q),
     );
   }, [projectList, projectSearchQuery]);
+  const canConnectProjectUrl = useMemo(
+    () => !!parseAudiotoolProjectRef(projectUrl),
+    [projectUrl],
+  );
 
   const beginRenameProject = (project: ProjectItem) => {
     setProjectManageError(null);
@@ -1118,7 +1103,7 @@ export default function App() {
                     Connect by URL
                   </label>
                   <p className="hint project-url-connect-hint">
-                    Paste a studio link, <code className="project-url-code">projects/…</code> id, or bare project id.
+                    Paste a project URL.
                   </p>
                   <div className="project-url-connect-row">
                     <input
@@ -1131,16 +1116,18 @@ export default function App() {
                       onKeyDown={(e) => {
                         if (e.key === 'Enter') {
                           e.preventDefault();
-                          void handleConnectFromProjectUrlField();
+                          if (canConnectProjectUrl) {
+                            void handleConnectFromProjectUrlField();
+                          }
                         }
                       }}
-                      aria-label="Project studio URL or project id"
+                      aria-label="Audiotool project URL"
                     />
                     <button
                       type="button"
                       className="tiny project-url-connect-btn"
                       onClick={() => void handleConnectFromProjectUrlField()}
-                      disabled={projectStatus === 'connecting' || !projectUrl.trim()}
+                      disabled={projectStatus === 'connecting' || !canConnectProjectUrl}
                     >
                       Connect
                     </button>
