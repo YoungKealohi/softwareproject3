@@ -238,7 +238,7 @@ describe('App component', () => {
       });
 
       expect(screen.getByText('Connect by URL')).toBeTruthy();
-      expect(screen.getByLabelText('Project studio URL or project id')).toBeTruthy();
+      expect(screen.getByLabelText('Audiotool project URL')).toBeTruthy();
     });
 
     it('filters projects by search query', async () => {

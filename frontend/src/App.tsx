@@ -972,21 +972,23 @@ export default function App() {
     }
     setProjectManageError(null);
     try {
+      const deletingConnectedProject = connectedProjectName === project.name;
+      if (syncedDocument && deletingConnectedProject) {
+        try {
+          await syncedDocument.stop();
+        } catch {
+          /* ignore stop errors; attempt delete anyway */
+        }
+        setSyncedDocument(null);
+        setProjectStatus('idle');
+        setConnectedProjectName(null);
+      }
+
       const response = await client.api.projectService.deleteProject({
         name: project.name,
       });
       if (response instanceof Error) {
         throw response;
-      }
-      if (syncedDocument && connectedProjectName === project.name) {
-        try {
-          await syncedDocument.stop();
-        } catch {
-          /* project is gone; still drop local sync */
-        }
-        setSyncedDocument(null);
-        setProjectStatus('idle');
-        setConnectedProjectName(null);
       }
       if (projectUrl.trim() === getStudioUrl(project.name)) {
         setProjectUrl('');
