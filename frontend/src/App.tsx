@@ -1368,51 +1368,6 @@ export default function App() {
     }
   };
 
-<<<<<<< HEAD
-=======
-  const handleDeleteProject = async (project: ProjectItem) => {
-    if (!client) {
-      return;
-    }
-    const ok = window.confirm(
-      `Delete project "${project.displayName}"? This cannot be undone.`,
-    );
-    if (!ok) {
-      return;
-    }
-    setProjectManageError(null);
-    try {
-      const deletingConnectedProject = connectedProjectName === project.name;
-      if (syncedDocument && deletingConnectedProject) {
-        try {
-          await syncedDocument.stop();
-        } catch {
-          /* ignore stop errors; attempt delete anyway */
-        }
-        setSyncedDocument(null);
-        setProjectStatus('idle');
-        setConnectedProjectName(null);
-      }
-
-      const response = await client.projects.deleteProject({
-        name: project.name,
-      });
-      if (response instanceof Error) {
-        throw response;
-      }
-      if (projectUrl.trim() === getStudioUrl(project.name)) {
-        setProjectUrl('');
-      }
-      setProjectList((prev) => prev.filter((p) => p.name !== project.name));
-      if (renamingProjectName === project.name) {
-        cancelRenameProject();
-      }
-    } catch (error) {
-      setProjectManageError(formatError(error));
-    }
-  };
-
->>>>>>> 7812c2e79d38e384bd52ba0e8a015b35293120fb
   const handleSidebarResizeStart = (event: React.PointerEvent<HTMLDivElement>) => {
     if (window.innerWidth <= 768) {
       return;
