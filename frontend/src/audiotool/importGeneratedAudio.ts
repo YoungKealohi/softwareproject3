@@ -14,6 +14,8 @@ function secondsToTicksAtBpm(seconds: number, bpm: number): number {
  */
 const SAMPLE_WRITE_SCOPE_HINT =
   ' Add sample:write to your Audiotool OAuth app, set VITE_AUDIOTOOL_SCOPE to "project:write sample:write", then log out and log in again.';
+const SAMPLE_READ_SCOPE_HINT =
+  ' If GetSample keeps failing, add sample:read and set VITE_AUDIOTOOL_SCOPE to "project:write sample:write sample:read", then log out and log in again.';
 
 const MIXER_STRIP_TYPES = [
   'mixerChannel',
@@ -184,6 +186,25 @@ function durationSecondsFromProtobuf(d: { seconds?: bigint | number; nanos?: num
   return s + n;
 }
 
+function isGetSampleNonRetryableError(e: unknown): boolean {
+  if (!(e instanceof Error)) return false;
+  const detail = e.message.toLowerCase();
+  const rawCode = (e as any).code;
+  const code = String(rawCode ?? '').toLowerCase();
+  return (
+    detail.includes('http 404') ||
+    detail.includes('unimplemented') ||
+    detail.includes('permission denied') ||
+    detail.includes('unauthenticated') ||
+    code === '12' || // UNIMPLEMENTED
+    code === '7' || // PERMISSION_DENIED
+    code === '16' || // UNAUTHENTICATED
+    code.includes('unimplemented') ||
+    code.includes('permissiondenied') ||
+    code.includes('unauthenticated')
+  );
+}
+
 /**
  * Upload audio bytes to Audiotool samples, then add an audio track + region on the timeline.
  * Pattern aligned with https://github.com/TrumanOakes/VideoAudioImporter
@@ -230,6 +251,12 @@ export async function importAudioBlobToProject(
   let playSeconds = Math.max(0.5, options.durationMs / 1000);
   for (let i = 0; i < 90; i++) {
     const gs = await client.samples.getSample({ name: apiSample.name });
+    if (isGrpcErrorResult(gs) && isGetSampleNonRetryableError(gs)) {
+      console.warn(
+        `[importAudioBlobToProject] getSample is unavailable for ${apiSample.name}; skipping readiness polling and using fallback duration.${SAMPLE_READ_SCOPE_HINT}`,
+      );
+      break;
+    }
     if (!isGrpcErrorResult(gs) && gs.sample) {
       const fromProto = durationSecondsFromProtobuf(gs.sample.playDuration as any);
       if (fromProto > 0.1) {

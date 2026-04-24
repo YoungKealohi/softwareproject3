@@ -167,6 +167,29 @@ describe('importGeneratedAudio tests', () => {
     expect(getSample).toHaveBeenCalledTimes(3);
   });
 
+  it('stops getSample polling on non-retryable errors (404/unimplemented)', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+    } as Response);
+
+    const getSampleError = Object.assign(new Error('HTTP 404'), { code: 12 });
+    const getSample = vi.fn().mockResolvedValue(getSampleError);
+
+    const fakeClient: any = createFakeClient({ getSample });
+    const fakeDoc: any = createFakeDoc();
+    const blob = new Blob([new Uint8Array([1, 2, 3])], { type: 'audio/mpeg' });
+
+    await importAudioBlobToProject(fakeClient, fakeDoc, blob, {
+      displayName: '404 test',
+      durationMs: 5000,
+    });
+
+    expect(getSample).toHaveBeenCalledTimes(1);
+    expect(fakeDoc.modify).toHaveBeenCalled();
+  });
+
   it('correctly uses layoutIndex for positioning', async () => {
     vi.mocked(fetch).mockResolvedValueOnce({
       ok: true,

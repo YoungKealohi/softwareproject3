@@ -305,7 +305,7 @@ export default function App() {
   const authConfig = {
     clientId: envClientId ?? '',
     redirectUrl: envRedirectUrl ?? defaultRedirectUrl,
-    scope: envScope ?? 'project:write sample:write',
+    scope: envScope ?? 'project:write sample:write sample:read',
   };
   const [authStatus, setAuthStatus] = useState<AudiotoolAuth | null>(null);
   const [authUser, setAuthUser] = useState<string | null>(null);
